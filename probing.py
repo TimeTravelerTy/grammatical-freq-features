@@ -38,11 +38,25 @@ def get_ud_filepaths(language, ud_base_folder):
     test_file = glob.glob(os.path.join(ud_folder, "*-ud-test.conllu"))
     return train_file[0] if train_file else None, test_file[0] if test_file else None
 
-def prepare_datasets(train_filepath, test_filepath, concept_key, concept_value, seed):
+def prepare_datasets(train_filepath, test_filepath, concept_key, concept_value, seed, pos_tags=None):
     """Prepare and balance the training and test datasets."""
-    filter_criterion = partial(concept_filter, concept_key=concept_key, concept_value=concept_value)
+    filter_criterion = partial(
+        concept_filter,
+        concept_key=concept_key,
+        concept_value=concept_value,
+        pos_tags=pos_tags,
+    )
     train_dataset = ProbingDataset(train_filepath, filter_criterion)
     test_dataset = ProbingDataset(test_filepath, filter_criterion)
+
+    train_pos = sum(train_dataset.labels)
+    test_pos = sum(test_dataset.labels)
+    train_total = len(train_dataset)
+    test_total = len(test_dataset)
+    train_ratio = train_pos / train_total if train_total else 0
+    test_ratio = test_pos / test_total if test_total else 0
+    print(f"Train positives: {train_pos}/{train_total} ({train_ratio:.2%})")
+    print(f"Test positives: {test_pos}/{test_total} ({test_ratio:.2%})")
 
     print("Balancing training dataset...")
     train_dataset = balance_dataset(train_dataset, seed)
@@ -101,7 +115,14 @@ def process_language(args, language):
                 logging.info(f"Probe already exists for {language} - {concept_key}: {concept_value}. Skipping.")
                 continue
 
-            train_dataset, test_dataset = prepare_datasets(train_filepath, test_filepath, concept_key, concept_value, args.seed)
+            train_dataset, test_dataset = prepare_datasets(
+                train_filepath,
+                test_filepath,
+                concept_key,
+                concept_value,
+                args.seed,
+                pos_tags=args.pos_tags,
+            )
 
             if train_dataset is None or len(train_dataset) < 128 or test_dataset is None:
                 print(f"Not enough samples. Skipping.")
@@ -123,6 +144,9 @@ def process_language(args, language):
             logging.info(f"Saved trained model to {model_path}")
 
 def main(args):
+    if args.pos_tags:
+        args.pos_tags = [tag.strip() for tag in args.pos_tags.split(",") if tag.strip()]
+
     if args.language:
         languages = [args.language]
         if not args.ud_train_file and not os.path.exists(os.path.join(args.ud_base_folder, f"UD_{args.language}")):
@@ -143,6 +167,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--language", type=str, help="Specific language to process (optional)")
     parser.add_argument("--concept_keys", type=str, default=None, help="Comma-separated concept keys to probe (e.g., Number,Tense)")
+    parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
     parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
     parser.add_argument("--ud_test_file", type=str, default=None, help="Override UD test .conllu path")

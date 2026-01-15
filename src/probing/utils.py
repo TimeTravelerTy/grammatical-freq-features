@@ -35,8 +35,10 @@ def extract_activations(model, dataloader, layer_num):
     
     return np.vstack(all_activations), np.concatenate(all_labels)
 
-def concept_filter(sentence, concept_key, concept_value):
+def concept_filter(sentence, concept_key, concept_value, pos_tags=None):
     for token in sentence:
+        if pos_tags and token.upos not in pos_tags:
+            continue
         if concept_key in token.feats and concept_value in token.feats.get(concept_key, {}):
             return True
     return False

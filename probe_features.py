@@ -106,7 +106,13 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
         torch_probe = convert_probe_to_pytorch(probe)
 
         # Prepare dataset
-        train_dataset = prepare_dataset(ud_train_filepath, concept_key, concept_value, args.seed)
+        train_dataset = prepare_dataset(
+            ud_train_filepath,
+            concept_key,
+            concept_value,
+            args.seed,
+            pos_tags=args.pos_tags,
+        )
         if train_dataset is None or len(train_dataset) < 128:
             if verbose:
                 print(f"Not enough samples in training set for {language}_{concept_key}_{concept_value}. Skipping.")
@@ -131,9 +137,14 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
 
     return outputs
 
-def prepare_dataset(ud_train_filepath, concept_key, concept_value, seed):
+def prepare_dataset(ud_train_filepath, concept_key, concept_value, seed, pos_tags=None):
     """Prepare and balance the dataset."""
-    filter_criterion = partial(concept_filter, concept_key=concept_key, concept_value=concept_value)
+    filter_criterion = partial(
+        concept_filter,
+        concept_key=concept_key,
+        concept_value=concept_value,
+        pos_tags=pos_tags,
+    )
     train_dataset = ProbingDataset(ud_train_filepath, filter_criterion)
     return balance_dataset(train_dataset, seed)
 
@@ -209,6 +220,10 @@ if __name__ == "__main__":
     parser.add_argument('--language', type=str, default=None, help="Specific language to process (optional)")
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
     parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
+    parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")
     args = parser.parse_args()
-    
+
+    if args.pos_tags:
+        args.pos_tags = [tag.strip() for tag in args.pos_tags.split(",") if tag.strip()]
+
     feature_selection(args)
