@@ -212,7 +212,8 @@ class SparseActivation():
         kwargs = {}
         for attribute in ['act', 'res', 'resc']:
             if getattr(self, attribute) is not None:
-                kwargs[attribute] = getattr(self, attribute).value
+                attr = getattr(self, attribute)
+                kwargs[attribute] = attr.value if hasattr(attr, "value") else attr
         return SparseActivation(**kwargs)
 
     def save(self):
