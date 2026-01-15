@@ -35,13 +35,76 @@ def extract_activations(model, dataloader, layer_num):
     
     return np.vstack(all_activations), np.concatenate(all_labels)
 
-def concept_filter(sentence, concept_key, concept_value, pos_tags=None):
+def concept_filter(
+    sentence,
+    concept_key,
+    concept_value,
+    pos_tags=None,
+    exclude_values=None,
+    exclude_other_values=False,
+    drop_conflicts=False,
+):
+    exclude_values = set(exclude_values or [])
+    has_target = False
+    has_excluded = False
     for token in sentence:
         if pos_tags and token.upos not in pos_tags:
             continue
-        if concept_key in token.feats and concept_value in token.feats.get(concept_key, {}):
-            return True
-    return False
+        if concept_key not in token.feats:
+            continue
+        values = token.feats.get(concept_key, set())
+        if concept_value in values:
+            has_target = True
+        if exclude_values and values.intersection(exclude_values):
+            has_excluded = True
+        if exclude_other_values and (values - {concept_value}):
+            has_excluded = True
+        if has_target and has_excluded:
+            return None if drop_conflicts else False
+    return has_target and not has_excluded
+
+
+def concept_label_stats(
+    conll_file,
+    concept_key,
+    concept_value,
+    pos_tags=None,
+    exclude_values=None,
+    exclude_other_values=False,
+    drop_conflicts=False,
+):
+    data = pyconll.load_from_file(conll_file)
+    exclude_values = set(exclude_values or [])
+    stats = {"only_target": 0, "only_excluded": 0, "both": 0, "neither": 0}
+    for sentence in data:
+        has_target = False
+        has_excluded = False
+        for token in sentence:
+            if pos_tags and token.upos not in pos_tags:
+                continue
+            if concept_key not in token.feats:
+                continue
+            values = token.feats.get(concept_key, set())
+            if concept_value in values:
+                has_target = True
+            if exclude_values and values.intersection(exclude_values):
+                has_excluded = True
+            if exclude_other_values and (values - {concept_value}):
+                has_excluded = True
+            if has_target and has_excluded:
+                break
+        if has_target and has_excluded:
+            stats["both"] += 1
+        elif has_target:
+            stats["only_target"] += 1
+        elif has_excluded:
+            stats["only_excluded"] += 1
+        else:
+            stats["neither"] += 1
+    stats["total"] = sum(stats.values())
+    if drop_conflicts:
+        stats["dropped"] = stats["both"]
+    return stats
 
 def get_features_and_values(conll_file):
     data = pyconll.load_from_file(conll_file)

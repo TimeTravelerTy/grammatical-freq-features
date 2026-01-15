@@ -47,7 +47,10 @@ class ProbingDataset(Dataset):
     def load_data(self, conll_file):
         data = pyconll.load_from_file(conll_file)
         for sentence in data:
-            label = 1 if self.filter_criterion(sentence) else 0
+            label = self.filter_criterion(sentence)
+            if label is None:
+                continue
+            label = 1 if label else 0
             self.sentences.append(sentence.text)
             self.labels.append(label)
 

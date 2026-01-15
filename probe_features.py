@@ -112,6 +112,9 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
             concept_value,
             args.seed,
             pos_tags=args.pos_tags,
+            exclude_values=args.exclude_values,
+            exclude_other_values=args.exclude_other_values,
+            drop_conflicts=args.drop_conflicts,
         )
         if train_dataset is None or len(train_dataset) < 128:
             if verbose:
@@ -137,13 +140,25 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
 
     return outputs
 
-def prepare_dataset(ud_train_filepath, concept_key, concept_value, seed, pos_tags=None):
+def prepare_dataset(
+    ud_train_filepath,
+    concept_key,
+    concept_value,
+    seed,
+    pos_tags=None,
+    exclude_values=None,
+    exclude_other_values=False,
+    drop_conflicts=False,
+):
     """Prepare and balance the dataset."""
     filter_criterion = partial(
         concept_filter,
         concept_key=concept_key,
         concept_value=concept_value,
         pos_tags=pos_tags,
+        exclude_values=exclude_values,
+        exclude_other_values=exclude_other_values,
+        drop_conflicts=drop_conflicts,
     )
     train_dataset = ProbingDataset(ud_train_filepath, filter_criterion)
     return balance_dataset(train_dataset, seed)
@@ -221,9 +236,18 @@ if __name__ == "__main__":
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
     parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
     parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")
+    parser.add_argument("--exclude_values", type=str, default=None, help="Comma-separated concept values to exclude (e.g., Plur)")
+    parser.add_argument("--exclude_other_values", action="store_true", help="Exclude sentences that contain any other values of the concept")
+    parser.add_argument("--drop_conflicts", action="store_true", help="Drop sentences that contain both target and excluded values")
     args = parser.parse_args()
 
     if args.pos_tags:
         args.pos_tags = [tag.strip() for tag in args.pos_tags.split(",") if tag.strip()]
+    if args.exclude_values:
+        args.exclude_values = [val.strip() for val in args.exclude_values.split(",") if val.strip()]
+    if args.exclude_other_values:
+        args.exclude_other_values = True
+    if args.drop_conflicts:
+        args.drop_conflicts = True
 
     feature_selection(args)

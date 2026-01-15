@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.config import HF_TOKEN
-from src.probing.utils import extract_activations, concept_filter, get_features_and_values
+from src.probing.utils import extract_activations, concept_filter, get_features_and_values, concept_label_stats
 from src.utils import get_available_languages
 from src.probing.data import ProbingDataset, balance_dataset
 
@@ -38,16 +38,68 @@ def get_ud_filepaths(language, ud_base_folder):
     test_file = glob.glob(os.path.join(ud_folder, "*-ud-test.conllu"))
     return train_file[0] if train_file else None, test_file[0] if test_file else None
 
-def prepare_datasets(train_filepath, test_filepath, concept_key, concept_value, seed, pos_tags=None):
+def prepare_datasets(
+    train_filepath,
+    test_filepath,
+    concept_key,
+    concept_value,
+    seed,
+    pos_tags=None,
+    exclude_values=None,
+    exclude_other_values=False,
+    drop_conflicts=False,
+):
     """Prepare and balance the training and test datasets."""
     filter_criterion = partial(
         concept_filter,
         concept_key=concept_key,
         concept_value=concept_value,
         pos_tags=pos_tags,
+        exclude_values=exclude_values,
+        exclude_other_values=exclude_other_values,
+        drop_conflicts=drop_conflicts,
     )
     train_dataset = ProbingDataset(train_filepath, filter_criterion)
     test_dataset = ProbingDataset(test_filepath, filter_criterion)
+
+    train_stats = concept_label_stats(
+        train_filepath,
+        concept_key,
+        concept_value,
+        pos_tags=pos_tags,
+        exclude_values=exclude_values,
+        exclude_other_values=exclude_other_values,
+        drop_conflicts=drop_conflicts,
+    )
+    test_stats = concept_label_stats(
+        test_filepath,
+        concept_key,
+        concept_value,
+        pos_tags=pos_tags,
+        exclude_values=exclude_values,
+        exclude_other_values=exclude_other_values,
+        drop_conflicts=drop_conflicts,
+    )
+    if train_stats["total"]:
+        print(
+            "Train label breakdown:"
+            f" only_target={train_stats['only_target']} ({train_stats['only_target'] / train_stats['total']:.2%})"
+            f" both={train_stats['both']} ({train_stats['both'] / train_stats['total']:.2%})"
+            f" only_excluded={train_stats['only_excluded']} ({train_stats['only_excluded'] / train_stats['total']:.2%})"
+            f" neither={train_stats['neither']} ({train_stats['neither'] / train_stats['total']:.2%})"
+        )
+        if drop_conflicts:
+            print(f"Train dropped conflicts: {train_stats.get('dropped', 0)}")
+    if test_stats["total"]:
+        print(
+            "Test label breakdown:"
+            f" only_target={test_stats['only_target']} ({test_stats['only_target'] / test_stats['total']:.2%})"
+            f" both={test_stats['both']} ({test_stats['both'] / test_stats['total']:.2%})"
+            f" only_excluded={test_stats['only_excluded']} ({test_stats['only_excluded'] / test_stats['total']:.2%})"
+            f" neither={test_stats['neither']} ({test_stats['neither'] / test_stats['total']:.2%})"
+        )
+        if drop_conflicts:
+            print(f"Test dropped conflicts: {test_stats.get('dropped', 0)}")
 
     train_pos = sum(train_dataset.labels)
     test_pos = sum(test_dataset.labels)
@@ -122,6 +174,9 @@ def process_language(args, language):
                 concept_value,
                 args.seed,
                 pos_tags=args.pos_tags,
+                exclude_values=args.exclude_values,
+                exclude_other_values=args.exclude_other_values,
+                drop_conflicts=args.drop_conflicts,
             )
 
             if train_dataset is None or len(train_dataset) < 128 or test_dataset is None:
@@ -146,6 +201,12 @@ def process_language(args, language):
 def main(args):
     if args.pos_tags:
         args.pos_tags = [tag.strip() for tag in args.pos_tags.split(",") if tag.strip()]
+    if args.exclude_values:
+        args.exclude_values = [val.strip() for val in args.exclude_values.split(",") if val.strip()]
+    if args.exclude_other_values:
+        args.exclude_other_values = True
+    if args.drop_conflicts:
+        args.drop_conflicts = True
 
     if args.language:
         languages = [args.language]
@@ -168,6 +229,9 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, help="Specific language to process (optional)")
     parser.add_argument("--concept_keys", type=str, default=None, help="Comma-separated concept keys to probe (e.g., Number,Tense)")
     parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")
+    parser.add_argument("--exclude_values", type=str, default=None, help="Comma-separated concept values to exclude (e.g., Plur)")
+    parser.add_argument("--exclude_other_values", action="store_true", help="Exclude sentences that contain any other values of the concept")
+    parser.add_argument("--drop_conflicts", action="store_true", help="Drop sentences that contain both target and excluded values")
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
     parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
     parser.add_argument("--ud_test_file", type=str, default=None, help="Override UD test .conllu path")
