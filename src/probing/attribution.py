@@ -14,8 +14,21 @@ def attribution_patching(
     steps=10,
     metric_kwargs=dict(),
 ):
-
-    clean_prefix = torch.cat([clean_prefix], dim=0).to("cuda")
+    device = model.device if hasattr(model, "device") else "cuda"
+    if isinstance(clean_prefix, dict):
+        input_ids = clean_prefix["input_ids"]
+        attention_mask = clean_prefix.get("attention_mask")
+        input_ids = input_ids if input_ids.dim() > 1 else torch.cat([input_ids], dim=0)
+        input_ids = input_ids.to(device)
+        if attention_mask is not None:
+            attention_mask = attention_mask if attention_mask.dim() > 1 else torch.cat([attention_mask], dim=0)
+            attention_mask = attention_mask.to(device)
+            clean_prefix = {"input_ids": input_ids, "attention_mask": attention_mask}
+        else:
+            clean_prefix = input_ids
+    else:
+        clean_prefix = clean_prefix if clean_prefix.dim() > 1 else torch.cat([clean_prefix], dim=0)
+        clean_prefix = clean_prefix.to(device)
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
