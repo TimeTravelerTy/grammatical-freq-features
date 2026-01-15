@@ -38,7 +38,7 @@ def setup_model(model_name_or_path="meta-llama/Meta-Llama-3-8B", device="auto", 
 
 
 def setup_autoencoder(checkpoint_path="./autoencoders/llama-3-8b-layer16.pt", device="cuda"):
-    dict = GatedAutoEncoder.from_pretrained(checkpoint_path)
+    dict = GatedAutoEncoder.from_pretrained(checkpoint_path, device=device, map_location=device)
     dict.to(device)
     return dict
 

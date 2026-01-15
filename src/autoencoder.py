@@ -89,11 +89,13 @@ class GatedAutoEncoder(Dictionary, nn.Module):
         else:
             return x_hat
 
-    def from_pretrained(path, device=None):
+    def from_pretrained(path, device=None, map_location=None):
         """
         Load a pretrained autoencoder from a file.
         """
-        state_dict = torch.load(path)
+        if map_location is None and device is not None:
+            map_location = device
+        state_dict = torch.load(path, map_location=map_location)
         dict_size, activation_dim = state_dict['encoder.weight'].shape
         autoencoder = GatedAutoEncoder(activation_dim, dict_size)
         autoencoder.load_state_dict(state_dict)
