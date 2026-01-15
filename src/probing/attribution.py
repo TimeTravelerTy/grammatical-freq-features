@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 import torch
 
 from src.activations import SparseActivation
@@ -15,9 +16,20 @@ def attribution_patching(
     metric_kwargs=dict(),
 ):
     device = model.device if hasattr(model, "device") else "cuda"
-    if isinstance(clean_prefix, dict):
-        input_ids = clean_prefix["input_ids"]
-        attention_mask = clean_prefix.get("attention_mask")
+
+    def get_input_value(inputs, key):
+        if isinstance(inputs, Mapping):
+            return inputs.get(key)
+        if hasattr(inputs, "data") and isinstance(inputs.data, dict):
+            return inputs.data.get(key)
+        try:
+            return inputs[key] if key in inputs else None
+        except Exception:
+            return None
+
+    input_ids = get_input_value(clean_prefix, "input_ids")
+    attention_mask = get_input_value(clean_prefix, "attention_mask")
+    if input_ids is not None:
         input_ids = input_ids if input_ids.dim() > 1 else torch.cat([input_ids], dim=0)
         input_ids = input_ids.to(device)
         if attention_mask is not None:
