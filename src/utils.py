@@ -37,7 +37,7 @@ def setup_model(model_name_or_path="meta-llama/Meta-Llama-3-8B", device="auto", 
     return model, submodule
 
 
-def setup_autoencoder(checkpoint_path="./checkpoints/autoencoder.pt", device="cuda"):
+def setup_autoencoder(checkpoint_path="./autoencoders/llama-3-8b-layer16.pt", device="cuda"):
     dict = GatedAutoEncoder.from_pretrained(checkpoint_path)
     dict.to(device)
     return dict
@@ -103,11 +103,12 @@ def get_available_languages(ud_base_folder):
                     languages.append(language)
     return languages
 
-def get_available_concepts(probe_dir):
+def get_available_concepts(probe_dir, concepts_path="data/concepts.json"):
     """Get all available concept combinations from probe files that are also in data/concepts.json."""
-    # Load valid concepts from data/concepts.json
-    with open('data/concepts.json', 'r') as f:
-        valid_concepts = json.load(f)
+    valid_concepts = None
+    if os.path.exists(concepts_path):
+        with open(concepts_path, 'r') as f:
+            valid_concepts = json.load(f)
 
     probe_files = glob.glob(os.path.join(probe_dir, "*.joblib"))
     concepts = set()
@@ -117,8 +118,11 @@ def get_available_concepts(probe_dir):
             concept_key = parts[-2]
             concept_value = parts[-1].replace('.joblib', '')
             
-            # Check if the concept is in the valid_concepts dictionary
-            if concept_key in valid_concepts and concept_value in valid_concepts[concept_key]:
+            # If a concept whitelist exists, filter against it.
+            if valid_concepts is not None:
+                if concept_key in valid_concepts and concept_value in valid_concepts[concept_key]:
+                    concepts.add((concept_key, concept_value))
+            else:
                 concepts.add((concept_key, concept_value))
     
     return list(concepts)
