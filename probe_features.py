@@ -39,14 +39,14 @@ def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
 
-def setup_model_and_autoencoder(model_name):
+def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16):
     """Set up the language model and autoencoder."""
-    model = LanguageModel(model_name, torch_dtype=torch.float16, device_map="auto", token=HF_TOKEN)
+    model = LanguageModel(model_name, torch_dtype=torch_dtype, device_map=device_map, token=HF_TOKEN)
     submodule = model.model.layers[16]
     if "llama" in model_name:
-        autoencoder = setup_autoencoder()
+        autoencoder = setup_autoencoder(device=device_map)
     else:
-        autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH)
+        autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH, device=device_map)
     print(f"Autoencoder dictionary size: {autoencoder.dict_size}")
     return model, submodule, autoencoder
 
@@ -194,7 +194,11 @@ def select_top_bottom_features(effects):
 
 def feature_selection(args):
     """Main function for feature selection across concepts and languages."""
-    model, submodule, autoencoder = setup_model_and_autoencoder(args.model_name)
+    model, submodule, autoencoder = setup_model_and_autoencoder(
+        args.model_name,
+        device_map=args.device_map,
+        torch_dtype=torch.float16 if args.device_map != "cpu" else torch.float32,
+    )
     
     probe_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
     output_dir = f"outputs/probing/features/{'llama' if 'llama' in args.model_name else 'aya'}"
@@ -239,6 +243,7 @@ if __name__ == "__main__":
     parser.add_argument("--exclude_values", type=str, default=None, help="Comma-separated concept values to exclude (e.g., Plur)")
     parser.add_argument("--exclude_other_values", action="store_true", help="Exclude sentences that contain any other values of the concept")
     parser.add_argument("--drop_conflicts", action="store_true", help="Drop sentences that contain both target and excluded values")
+    parser.add_argument("--device_map", type=str, default="cuda", help="Device map for model/SAE (e.g., cuda, cpu, auto)")
     args = parser.parse_args()
 
     if args.pos_tags:
