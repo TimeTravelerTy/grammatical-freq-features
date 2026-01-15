@@ -66,7 +66,10 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
         print(f"Processing concept: {concept_key}:{concept_value}")
     
     outputs = load_progress(output_dir, concept_key, concept_value)
-    languages = get_available_languages(UD_BASE_FOLDER)
+    if args.language:
+        languages = [args.language]
+    else:
+        languages = get_available_languages(args.ud_base_folder)
 
     for language in tqdm(languages, desc=f"Processing languages for {concept_key}:{concept_value}", leave=False, disable=not verbose):
         if language in outputs:
@@ -74,13 +77,16 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
                 print(f"Skipping {language} - already processed.")
             continue
 
-        ud_folder = f"{UD_BASE_FOLDER}UD_{language}/"
-        ud_train_filepath = glob.glob(os.path.join(ud_folder, "*-ud-train.conllu"))
-        if not ud_train_filepath:
-            if verbose:
-                print(f"Training file not found for {language}. Skipping.")
-            continue
-        ud_train_filepath = ud_train_filepath[0]
+        if args.ud_train_file:
+            ud_train_filepath = args.ud_train_file
+        else:
+            ud_folder = f"{args.ud_base_folder}UD_{language}/"
+            ud_train_filepath = glob.glob(os.path.join(ud_folder, "*-ud-train.conllu"))
+            if not ud_train_filepath:
+                if verbose:
+                    print(f"Training file not found for {language}. Skipping.")
+                continue
+            ud_train_filepath = ud_train_filepath[0]
 
         # Check if the concept exists for this language
         features = get_features_and_values(ud_train_filepath)
@@ -200,6 +206,9 @@ if __name__ == "__main__":
     parser.add_argument('--concept_value', type=str, default=None, help="Concept value for probing")
     parser.add_argument("--model_name", type=str, required=True, help="Name of the language model")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument('--language', type=str, default=None, help="Specific language to process (optional)")
+    parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
+    parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
     args = parser.parse_args()
     
     feature_selection(args)

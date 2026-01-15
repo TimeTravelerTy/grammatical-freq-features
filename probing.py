@@ -12,7 +12,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.config import HF_TOKEN
-from src.probing.utils import extract_activations, concept_filter, get_available_languages, get_features_and_values
+from src.probing.utils import extract_activations, concept_filter, get_features_and_values
+from src.utils import get_available_languages
 from src.probing.data import ProbingDataset, balance_dataset
 
 # Constants
@@ -30,9 +31,9 @@ def setup_model(model_name):
     """Initialize and return the language model."""
     return LanguageModel(model_name, torch_dtype=torch.float16, device_map="auto", token=HF_TOKEN)
 
-def get_ud_filepaths(language):
+def get_ud_filepaths(language, ud_base_folder):
     """Get the filepaths for Universal Dependencies train and test files."""
-    ud_folder = os.path.join(UD_BASE_FOLDER, f"UD_{language}")
+    ud_folder = os.path.join(ud_base_folder, f"UD_{language}")
     train_file = glob.glob(os.path.join(ud_folder, "*-ud-train.conllu"))
     test_file = glob.glob(os.path.join(ud_folder, "*-ud-test.conllu"))
     return train_file[0] if train_file else None, test_file[0] if test_file else None
@@ -70,7 +71,11 @@ def process_language(args, language):
     logging.info(f"Processing language: {language}")
     
     model = setup_model(args.model_name)
-    train_filepath, test_filepath = get_ud_filepaths(language)
+    if args.ud_train_file and args.ud_test_file:
+        train_filepath = args.ud_train_file
+        test_filepath = args.ud_test_file
+    else:
+        train_filepath, test_filepath = get_ud_filepaths(language, args.ud_base_folder)
 
     if not train_filepath or not test_filepath:
         print(f"Skipping {language}: Missing train or test file")
@@ -78,6 +83,9 @@ def process_language(args, language):
         return
 
     features = get_features_and_values(train_filepath)
+    if args.concept_keys:
+        keys = {k.strip() for k in args.concept_keys.split(",") if k.strip()}
+        features = {k: v for k, v in features.items() if k in keys}
 
     output_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
     for concept_key, values in features.items():
@@ -117,12 +125,12 @@ def process_language(args, language):
 def main(args):
     if args.language:
         languages = [args.language]
-        if not os.path.exists(os.path.join(UD_BASE_FOLDER, f"UD_{args.language}")):
+        if not args.ud_train_file and not os.path.exists(os.path.join(args.ud_base_folder, f"UD_{args.language}")):
             print(f"Error: Language '{args.language}' not found in Universal Dependencies folder.")
             logging.error(f"Language '{args.language}' not found in Universal Dependencies folder.")
             return
     else:
-        languages = get_available_languages(UD_BASE_FOLDER)
+        languages = get_available_languages(args.ud_base_folder)
     
     for language in languages:
         process_language(args, language)
@@ -134,6 +142,10 @@ if __name__ == "__main__":
     parser.add_argument("--layer_num", type=int, default=16, help="Layer number to extract activations from")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--language", type=str, help="Specific language to process (optional)")
+    parser.add_argument("--concept_keys", type=str, default=None, help="Comma-separated concept keys to probe (e.g., Number,Tense)")
+    parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
+    parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
+    parser.add_argument("--ud_test_file", type=str, default=None, help="Override UD test .conllu path")
     args = parser.parse_args()
 
     main(args)
