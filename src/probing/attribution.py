@@ -137,15 +137,19 @@ def attribution_patching(
                 f.res.retain_grad()
                 fs.append(f)
                 if text_input:
-                    invoke_ctx = tracer.invoke(clean_prefix)
+                    with tracer.invoke(clean_prefix):
+                        if is_tuple[submodule]:
+                            submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                        else:
+                            submodule.output = dictionary.decode(f.act) + f.res
+                        metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
                 else:
-                    invoke_ctx = tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan'])
-                with invoke_ctx:
-                    if is_tuple[submodule]:
-                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                    else:
-                        submodule.output = dictionary.decode(f.act) + f.res
-                    metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
+                    with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
+                        if is_tuple[submodule]:
+                            submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                        else:
+                            submodule.output = dictionary.decode(f.act) + f.res
+                        metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
             if not metrics:
                 raise RuntimeError("No metrics collected; check steps and tracing inputs.")
             metric = metrics[0]
