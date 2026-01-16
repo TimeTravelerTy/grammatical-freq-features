@@ -6,6 +6,27 @@ from src.activations import SparseActivation
 TRACER_KWARGS = {'scan' : False, 'validate' : False}
 
 
+def _resolve_device(model, submodules, dictionaries):
+    device = getattr(model, "device", None)
+    if isinstance(device, str):
+        device = torch.device(device)
+    if isinstance(device, torch.device) and device.type != "meta":
+        return device
+    model_root = getattr(model, "model", model)
+    for param in model_root.parameters():
+        if param.device.type != "meta":
+            return param.device
+    for module in submodules:
+        for param in module.parameters():
+            if param.device.type != "meta":
+                return param.device
+    for dictionary in dictionaries.values():
+        for param in dictionary.parameters():
+            if param.device.type != "meta":
+                return param.device
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def attribution_patching(
     clean_prefix,
     model,
@@ -15,7 +36,9 @@ def attribution_patching(
     steps=10,
     metric_kwargs=dict(),
 ):
-    device = model.device if hasattr(model, "device") else "cuda"
+    device = _resolve_device(model, submodules, dictionaries)
+    if hasattr(probe, "to"):
+        probe = probe.to(device)
 
     def get_input_value(inputs, key):
         if isinstance(inputs, Mapping):

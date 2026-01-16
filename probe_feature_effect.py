@@ -88,8 +88,7 @@ def extract_activations(model, batch, layer_num):
 
 def evaluate_probe(model, submodule, autoencoder, probe, dataset, top_features=None):
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False)
-    torch_probe = convert_probe_to_pytorch(probe)
-    torch_probe = torch_probe.to(device)
+    torch_probe = convert_probe_to_pytorch(probe, device=device)
     
     correct = 0
     total = 0

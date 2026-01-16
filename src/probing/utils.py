@@ -125,12 +125,14 @@ class LogisticRegressionPyTorch(nn.Module):
     def forward(self, x):
         return self.linear(x) 
     
-def convert_probe_to_pytorch(probe):
-    """Convert sklearn probe to PyTorch model."""
+def convert_probe_to_pytorch(probe, device=None):
+    """Convert sklearn probe to a PyTorch model."""
     coef = probe.coef_.ravel()
     bias = probe.intercept_
-    torch_probe = LogisticRegressionPyTorch(4096)
+    torch_probe = LogisticRegressionPyTorch(coef.shape[0])
     with torch.no_grad():
-        torch_probe.linear.weight.copy_(torch.tensor(coef).unsqueeze(0))
-        torch_probe.linear.bias.copy_(torch.tensor(bias))
-    return torch_probe.to("cuda")
+        torch_probe.linear.weight.copy_(torch.tensor(coef, dtype=torch.float32).unsqueeze(0))
+        torch_probe.linear.bias.copy_(torch.tensor(bias, dtype=torch.float32))
+    if device is not None:
+        torch_probe = torch_probe.to(device)
+    return torch_probe

@@ -40,6 +40,24 @@ def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
 
+def resolve_device(model, submodule, autoencoder):
+    device = getattr(model, "device", None)
+    if isinstance(device, str):
+        device = torch.device(device)
+    if isinstance(device, torch.device) and device.type != "meta":
+        return device
+    model_root = getattr(model, "model", model)
+    for param in model_root.parameters():
+        if param.device.type != "meta":
+            return param.device
+    for param in submodule.parameters():
+        if param.device.type != "meta":
+            return param.device
+    for param in autoencoder.parameters():
+        if param.device.type != "meta":
+            return param.device
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16, load_with_transformers=False):
     """Set up the language model and autoencoder."""
     model = None
@@ -78,10 +96,14 @@ def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch
             except Exception:
                 pass
     submodule = model.model.layers[16]
+    ae_device = device_map
+    if not isinstance(ae_device, torch.device):
+        if not (isinstance(ae_device, str) and (ae_device == "cpu" or ae_device.startswith("cuda"))):
+            ae_device = "cuda" if torch.cuda.is_available() else "cpu"
     if "llama" in model_name:
-        autoencoder = setup_autoencoder(device=device_map)
+        autoencoder = setup_autoencoder(device=ae_device)
     else:
-        autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH, device=device_map)
+        autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH, device=ae_device)
     print(f"Autoencoder dictionary size: {autoencoder.dict_size}")
     return model, submodule, autoencoder
 
@@ -138,7 +160,7 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
             continue
         
         probe = joblib.load(probe_file)
-        torch_probe = convert_probe_to_pytorch(probe)
+        torch_probe = convert_probe_to_pytorch(probe, device=resolve_device(model, submodule, autoencoder))
 
         # Prepare dataset
         train_dataset = prepare_dataset(
