@@ -52,6 +52,8 @@ def attribution_patching(
             return all(isinstance(item, str) for item in value)
         return False
 
+    text_input = is_text_input(clean_prefix)
+
     def get_input_value(inputs, key):
         if isinstance(inputs, Mapping):
             return inputs.get(key)
@@ -62,7 +64,7 @@ def attribution_patching(
         except Exception:
             return None
 
-    if is_text_input(clean_prefix):
+    if text_input:
         input_ids = None
     else:
         input_ids = get_input_value(clean_prefix, "input_ids")
@@ -76,7 +78,7 @@ def attribution_patching(
             clean_prefix = {"input_ids": input_ids, "attention_mask": attention_mask}
         else:
             clean_prefix = input_ids
-    elif not is_text_input(clean_prefix):
+    elif not text_input:
         clean_prefix = clean_prefix if clean_prefix.dim() > 1 else torch.cat([clean_prefix], dim=0)
         clean_prefix = clean_prefix.to(device)
 
@@ -93,7 +95,8 @@ def attribution_patching(
             is_tuple[submodule] = True # type(submodule.output) == tuple
 
     hidden_states_clean = {}
-    with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
+    trace_kwargs = TRACER_KWARGS if not text_input else {}
+    with model.trace(clean_prefix, **trace_kwargs), torch.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]
             x = submodule.output
@@ -133,7 +136,11 @@ def attribution_patching(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
+                if text_input:
+                    invoke_ctx = tracer.invoke(clean_prefix)
+                else:
+                    invoke_ctx = tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan'])
+                with invoke_ctx:
                     if is_tuple[submodule]:
                         submodule.output[0][:] = dictionary.decode(f.act) + f.res
                     else:
