@@ -39,6 +39,11 @@ def attribution_patching(
     device = _resolve_device(model, submodules, dictionaries)
     if hasattr(probe, "to"):
         probe = probe.to(device)
+    if steps is None:
+        steps = 1
+    steps = int(steps)
+    if steps < 1:
+        steps = 1
 
     def get_input_value(inputs, key):
         if isinstance(inputs, Mapping):

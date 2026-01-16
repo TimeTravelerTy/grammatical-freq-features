@@ -24,6 +24,11 @@ def attribution_patching(
     steps=10,
     metric_kwargs=dict(),
 ):
+    if steps is None:
+        steps = 1
+    steps = int(steps)
+    if steps < 1:
+        steps = 1
 
     clean_prefix = torch.cat([clean_prefix], dim=0).to("cuda")
     patch_prefix = torch.cat([patch_prefix], dim=0).to("cuda")
