@@ -41,7 +41,19 @@ def cleanup_memory():
 
 def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16):
     """Set up the language model and autoencoder."""
-    model = LanguageModel(model_name, torch_dtype=torch_dtype, device_map=device_map, token=HF_TOKEN)
+    model_device_map = None if device_map in ["cuda", "cuda:0", "cpu"] else device_map
+    model = LanguageModel(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map=model_device_map,
+        token=HF_TOKEN,
+        low_cpu_mem_usage=False if model_device_map is None else True,
+    )
+    if model_device_map is None:
+        try:
+            model.to(device_map)
+        except Exception:
+            pass
     submodule = model.model.layers[16]
     if "llama" in model_name:
         autoencoder = setup_autoencoder(device=device_map)
