@@ -124,7 +124,11 @@ def attribution_patching(
                     else:
                         submodule.output = dictionary.decode(f.act) + f.res
                     metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
-            metric = sum([m for m in metrics])
+            if not metrics:
+                raise RuntimeError("No metrics collected; check steps and tracing inputs.")
+            metric = metrics[0]
+            for m in metrics[1:]:
+                metric = metric + m
             metric.sum().backward(retain_graph=True) 
 
         mean_grad = sum([f.act.grad for f in fs]) / steps
