@@ -7,15 +7,6 @@ TRACER_KWARGS = {'scan' : False, 'validate' : False}
 
 
 def _resolve_device(model, submodules, dictionaries):
-    device = getattr(model, "device", None)
-    if isinstance(device, str):
-        device = torch.device(device)
-    if isinstance(device, torch.device) and device.type != "meta":
-        return device
-    model_root = getattr(model, "model", model)
-    for param in model_root.parameters():
-        if param.device.type != "meta":
-            return param.device
     for module in submodules:
         for param in module.parameters():
             if param.device.type != "meta":
@@ -24,6 +15,15 @@ def _resolve_device(model, submodules, dictionaries):
         for param in dictionary.parameters():
             if param.device.type != "meta":
                 return param.device
+    model_root = getattr(model, "model", model)
+    for param in model_root.parameters():
+        if param.device.type != "meta":
+            return param.device
+    device = getattr(model, "device", None)
+    if isinstance(device, str):
+        device = torch.device(device)
+    if isinstance(device, torch.device) and device.type != "meta":
+        return device
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -79,12 +79,19 @@ def attribution_patching(
 
     hidden_states_clean = {}
     with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
-        for submodule in submodules:
-            dictionary = dictionaries[submodule]
-            x = submodule.output
-            if is_tuple[submodule]:
-                x = x[0]
-            f = dictionary.encode(x)
+    for submodule in submodules:
+        dictionary = dictionaries[submodule]
+        x = submodule.output
+        if is_tuple[submodule]:
+            x = x[0]
+        if hasattr(x, "device") and x.device.type != "meta":
+            dict_device = next(dictionary.parameters()).device
+            if dict_device != x.device:
+                dictionary = dictionary.to(x.device)
+                dictionaries[submodule] = dictionary
+            if hasattr(probe, "to"):
+                probe = probe.to(x.device)
+        f = dictionary.encode(x)
             x_hat = dictionary.decode(f)
             residual = x - x_hat
             hidden_states_clean[submodule] = SparseActivation(act=f.save(), res=residual.save())

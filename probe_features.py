@@ -40,19 +40,24 @@ def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
 
-def resolve_device(model, submodule, autoencoder):
-    device = getattr(model, "device", None)
-    if isinstance(device, str):
-        device = torch.device(device)
-    if isinstance(device, torch.device) and device.type != "meta":
-        return device
+def resolve_submodule_device(model, submodule, fallback=None):
+    for param in submodule.parameters():
+        if param.device.type != "meta":
+            return param.device
     model_root = getattr(model, "model", model)
     for param in model_root.parameters():
         if param.device.type != "meta":
             return param.device
-    for param in submodule.parameters():
-        if param.device.type != "meta":
-            return param.device
+    if isinstance(fallback, torch.device):
+        return fallback
+    if isinstance(fallback, str) and (fallback == "cpu" or fallback.startswith("cuda")):
+        return torch.device(fallback)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def resolve_device(model, submodule, autoencoder):
+    device = resolve_submodule_device(model, submodule)
+    if device is not None:
+        return device
     for param in autoencoder.parameters():
         if param.device.type != "meta":
             return param.device
@@ -96,10 +101,7 @@ def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch
             except Exception:
                 pass
     submodule = model.model.layers[16]
-    ae_device = device_map
-    if not isinstance(ae_device, torch.device):
-        if not (isinstance(ae_device, str) and (ae_device == "cpu" or ae_device.startswith("cuda"))):
-            ae_device = "cuda" if torch.cuda.is_available() else "cpu"
+    ae_device = resolve_submodule_device(model, submodule, fallback=device_map)
     if "llama" in model_name:
         autoencoder = setup_autoencoder(device=ae_device)
     else:
