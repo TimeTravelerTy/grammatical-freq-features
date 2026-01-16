@@ -8,6 +8,7 @@ from functools import partial
 import joblib
 import torch
 import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from nnsight import LanguageModel
@@ -39,21 +40,43 @@ def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
 
-def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16):
+def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16, load_with_transformers=False):
     """Set up the language model and autoencoder."""
-    model_device_map = None if device_map in ["cuda", "cuda:0", "cpu"] else device_map
-    model = LanguageModel(
-        model_name,
-        torch_dtype=torch_dtype,
-        device_map=model_device_map,
-        token=HF_TOKEN,
-        low_cpu_mem_usage=False if model_device_map is None else True,
-    )
-    if model_device_map is None:
+    model = None
+    if load_with_transformers:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            padding_side="left",
+            token=HF_TOKEN,
+        )
+        tokenizer.pad_token = tokenizer.eos_token
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=False,
+            token=HF_TOKEN,
+        )
+        if device_map not in ["auto", None]:
+            hf_model.to(device_map)
+        hf_model.eval()
         try:
-            model.to(device_map)
+            model = LanguageModel(hf_model, tokenizer=tokenizer)
         except Exception:
-            pass
+            model = None
+    if model is None:
+        model_device_map = None if device_map in ["cuda", "cuda:0", "cpu"] else device_map
+        model = LanguageModel(
+            model_name,
+            torch_dtype=torch_dtype,
+            device_map=model_device_map,
+            token=HF_TOKEN,
+            low_cpu_mem_usage=False if model_device_map is None else True,
+        )
+        if model_device_map is None:
+            try:
+                model.to(device_map)
+            except Exception:
+                pass
     submodule = model.model.layers[16]
     if "llama" in model_name:
         autoencoder = setup_autoencoder(device=device_map)
@@ -210,6 +233,7 @@ def feature_selection(args):
         args.model_name,
         device_map=args.device_map,
         torch_dtype=torch.float16 if args.device_map != "cpu" else torch.float32,
+        load_with_transformers=args.load_with_transformers,
     )
     
     probe_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
@@ -256,6 +280,7 @@ if __name__ == "__main__":
     parser.add_argument("--exclude_other_values", action="store_true", help="Exclude sentences that contain any other values of the concept")
     parser.add_argument("--drop_conflicts", action="store_true", help="Drop sentences that contain both target and excluded values")
     parser.add_argument("--device_map", type=str, default="cuda", help="Device map for model/SAE (e.g., cuda, cpu, auto)")
+    parser.add_argument("--load_with_transformers", action="store_true", help="Load model with transformers before wrapping with nnsight")
     args = parser.parse_args()
 
     if args.pos_tags:
