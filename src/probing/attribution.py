@@ -45,6 +45,13 @@ def attribution_patching(
     if steps < 1:
         steps = 1
 
+    def is_text_input(value):
+        if isinstance(value, str):
+            return True
+        if isinstance(value, (list, tuple)) and value:
+            return all(isinstance(item, str) for item in value)
+        return False
+
     def get_input_value(inputs, key):
         if isinstance(inputs, Mapping):
             return inputs.get(key)
@@ -55,8 +62,11 @@ def attribution_patching(
         except Exception:
             return None
 
-    input_ids = get_input_value(clean_prefix, "input_ids")
-    attention_mask = get_input_value(clean_prefix, "attention_mask")
+    if is_text_input(clean_prefix):
+        input_ids = None
+    else:
+        input_ids = get_input_value(clean_prefix, "input_ids")
+    attention_mask = None if input_ids is None else get_input_value(clean_prefix, "attention_mask")
     if input_ids is not None:
         input_ids = input_ids if input_ids.dim() > 1 else torch.cat([input_ids], dim=0)
         input_ids = input_ids.to(device)
@@ -66,7 +76,7 @@ def attribution_patching(
             clean_prefix = {"input_ids": input_ids, "attention_mask": attention_mask}
         else:
             clean_prefix = input_ids
-    else:
+    elif not is_text_input(clean_prefix):
         clean_prefix = clean_prefix if clean_prefix.dim() > 1 else torch.cat([clean_prefix], dim=0)
         clean_prefix = clean_prefix.to(device)
 
