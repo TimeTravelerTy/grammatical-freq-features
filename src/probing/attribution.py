@@ -79,19 +79,19 @@ def attribution_patching(
 
     hidden_states_clean = {}
     with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
-    for submodule in submodules:
-        dictionary = dictionaries[submodule]
-        x = submodule.output
-        if is_tuple[submodule]:
-            x = x[0]
-        if hasattr(x, "device") and x.device.type != "meta":
-            dict_device = next(dictionary.parameters()).device
-            if dict_device != x.device:
-                dictionary = dictionary.to(x.device)
-                dictionaries[submodule] = dictionary
-            if hasattr(probe, "to"):
-                probe = probe.to(x.device)
-        f = dictionary.encode(x)
+        for submodule in submodules:
+            dictionary = dictionaries[submodule]
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+            if hasattr(x, "device") and x.device.type != "meta":
+                dict_device = next(dictionary.parameters()).device
+                if dict_device != x.device:
+                    dictionary = dictionary.to(x.device)
+                    dictionaries[submodule] = dictionary
+                if hasattr(probe, "to"):
+                    probe = probe.to(x.device)
+            f = dictionary.encode(x)
             x_hat = dictionary.decode(f)
             residual = x - x_hat
             hidden_states_clean[submodule] = SparseActivation(act=f.save(), res=residual.save())

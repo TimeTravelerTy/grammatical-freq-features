@@ -71,6 +71,10 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+outputs/
+logs/
+data/en_ewt-ud/
+
 # PyBuilder
 .pybuilder/
 target/
