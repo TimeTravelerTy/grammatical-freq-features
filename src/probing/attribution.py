@@ -100,9 +100,11 @@ def attribution_patching(
             if is_tuple[submodule]:
                 x = x[0]
             if hasattr(x, "device") and x.device.type != "meta":
-                dict_device = next(dictionary.parameters()).device
-                if dict_device != x.device:
-                    dictionary = dictionary.to(x.device)
+                dict_param = next(dictionary.parameters())
+                dict_device = dict_param.device
+                dict_dtype = dict_param.dtype
+                if dict_device != x.device or dict_dtype != x.dtype:
+                    dictionary = dictionary.to(device=x.device, dtype=x.dtype)
                     dictionaries[submodule] = dictionary
                 if hasattr(probe, "to"):
                     probe = probe.to(x.device)
