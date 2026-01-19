@@ -70,6 +70,9 @@ def attribution_patching(
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
         acts_gathered = submodule.output[0].sum(1)
+        if hasattr(probe, "parameters"):
+            probe_device = next(probe.parameters()).device
+            acts_gathered = acts_gathered.to(probe_device)
         metric = - probe(acts_gathered.float())
         return metric
     
