@@ -1,5 +1,4 @@
 import torch
-from collections.abc import Mapping
 
 from src.activations import SparseActivation
 
@@ -45,26 +44,7 @@ def attribution_patching(
     if steps < 1:
         steps = 1
 
-    input_debug = {}
-    if isinstance(clean_prefix, Mapping):
-        input_ids = clean_prefix.get("input_ids")
-        if input_ids is None:
-            raise KeyError("input_ids")
-        attention_mask = clean_prefix.get("attention_mask")
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-        elif attention_mask.dim() == 1:
-            attention_mask = attention_mask.unsqueeze(0)
-        input_debug["input_ids_shape"] = tuple(input_ids.shape)
-        input_debug["attention_mask_shape"] = tuple(attention_mask.shape)
-        clean_prefix = {
-            "input_ids": input_ids.to(device),
-            "attention_mask": attention_mask.to(device),
-        }
-    else:
-        clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
+    clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
         input_debug["clean_prefix_shape"] = tuple(clean_prefix.shape)
 
     def metric_fn(model, submodule, probe):
@@ -114,26 +94,40 @@ def attribution_patching(
         with model.trace(**TRACER_KWARGS) as tracer:
             metrics = []
             fs = []
+            step_count = 0
             for step in range(steps):
+                step_count += 1
                 alpha = step / steps
                 f = (1 - alpha) * clean_state + alpha * patch_state
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
-                    if is_tuple[submodule]:
-                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                    else:
-                        submodule.output = dictionary.decode(f.act) + f.res
-                    metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
+                try:
+                    with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
+                        if is_tuple[submodule]:
+                            submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                        else:
+                            submodule.output = dictionary.decode(f.act) + f.res
+                        metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
+                except Exception as exc:
+                    print(
+                        "attribution_patching invoke exception",
+                        {
+                            "step": step,
+                            "steps": steps,
+                            "clean_prefix_shape": tuple(clean_prefix.shape) if hasattr(clean_prefix, "shape") else None,
+                            "exception": str(exc),
+                        },
+                    )
+                    raise
             if not metrics:
                 print(
                     "attribution_patching debug: no metrics collected",
                     {
                         "steps": steps,
-                        "input_debug": input_debug,
-                        "is_mapping_input": isinstance(clean_prefix, Mapping),
-                        "clean_prefix_type": type(clean_prefix),
+                        "step_count": step_count,
+                        "clean_prefix_shape": tuple(clean_prefix.shape) if hasattr(clean_prefix, "shape") else None,
+                        "is_mapping_input": False,
                     },
                 )
                 raise RuntimeError("No metrics collected; check steps and tracing inputs.")
