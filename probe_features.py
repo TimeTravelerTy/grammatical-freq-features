@@ -230,7 +230,7 @@ def attribution_patching_loop(dataset, model, torch_probe, submodule, autoencode
         if i >= 128:
             break
         tokens = model.tokenizer(example["sentence"][0], return_tensors="pt", padding=False)
-        e, _, _, _ = attribution_patching(tokens["input_ids"], model, torch_probe, [submodule], {submodule: autoencoder})
+        e, _, _, _ = attribution_patching(tokens, model, torch_probe, [submodule], {submodule: autoencoder})
         if submodule not in effects:
             effects[submodule] = e[submodule].sum(dim=0)
         else:

@@ -1,4 +1,5 @@
 import torch
+from collections.abc import Mapping
 
 from src.activations import SparseActivation
 
@@ -44,7 +45,23 @@ def attribution_patching(
     if steps < 1:
         steps = 1
 
-    clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
+    if isinstance(clean_prefix, Mapping):
+        input_ids = clean_prefix.get("input_ids")
+        if input_ids is None:
+            raise KeyError("input_ids")
+        attention_mask = clean_prefix.get("attention_mask")
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        elif attention_mask.dim() == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+        clean_prefix = {
+            "input_ids": input_ids.to(device),
+            "attention_mask": attention_mask.to(device),
+        }
+    else:
+        clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
