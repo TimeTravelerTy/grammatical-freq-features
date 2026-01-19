@@ -1,4 +1,5 @@
 import torch
+from collections.abc import Mapping
 
 from src.activations import SparseActivation
 
@@ -44,7 +45,7 @@ def attribution_patching(
     if steps < 1:
         steps = 1
 
-    if isinstance(clean_prefix, dict):
+    if isinstance(clean_prefix, Mapping):
         input_ids = clean_prefix.get("input_ids")
         attention_mask = clean_prefix.get("attention_mask")
         if input_ids is None:
