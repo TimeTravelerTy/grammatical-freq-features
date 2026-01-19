@@ -90,7 +90,7 @@ def attribution_patching(
     is_tuple = {}
     with model.trace("_", **TRACER_KWARGS):
         for submodule in submodules:
-            is_tuple[submodule] = True # type(submodule.output) == tuple
+            is_tuple[submodule] = isinstance(submodule.output, tuple)
 
     hidden_states_clean = {}
     with model.trace(clean_inputs, **TRACER_KWARGS), torch.no_grad():
