@@ -45,10 +45,6 @@ def attribution_patching(
         steps = 1
 
     clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
-    clean_inputs = {
-        "input_ids": clean_prefix,
-        "attention_mask": torch.ones_like(clean_prefix, device=device),
-    }
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
@@ -63,7 +59,7 @@ def attribution_patching(
             is_tuple[submodule] = True # type(submodule.output) == tuple
 
     hidden_states_clean = {}
-    with model.trace(clean_inputs, **TRACER_KWARGS), torch.no_grad():
+    with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]
             x = submodule.output
@@ -98,6 +94,7 @@ def attribution_patching(
             metrics = []
             fs = []
             step_count = 0
+            appended = False
             for step in range(steps):
                 step_count += 1
                 alpha = step / steps
@@ -105,14 +102,15 @@ def attribution_patching(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
+                with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
                     if is_tuple[submodule]:
                         submodule.output[0][:] = dictionary.decode(f.act) + f.res
                     else:
                         submodule.output = dictionary.decode(f.act) + f.res
                     metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
-            if not metrics:
-                raise RuntimeError("No metrics collected; check steps and tracing inputs.")
+                    appended = True
+            if not appended:
+                raise RuntimeError(f"No metrics collected; steps={steps}, step_count={step_count}, shape={tuple(clean_prefix.shape)}")
             metric = metrics[0]
             for m in metrics[1:]:
                 metric = metric + m
