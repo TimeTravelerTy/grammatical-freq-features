@@ -79,6 +79,18 @@ def attribution_patching(
         for submodule in submodules:
             is_tuple[submodule] = True # type(submodule.output) == tuple
 
+    if metric_kwargs.get("_debug_trace", False):
+        with model.trace(clean_inputs, **TRACER_KWARGS):
+            test_metric = metric_fn(model, submodules[0], probe).save()
+        print(
+            "attribution_patching trace sanity",
+            {
+                "metric_shape": tuple(test_metric.value.shape) if hasattr(test_metric.value, "shape") else None,
+                "input_ids_shape": tuple(clean_inputs["input_ids"].shape),
+                "attention_mask_shape": tuple(clean_inputs["attention_mask"].shape),
+            },
+        )
+
     hidden_states_clean = {}
     with model.trace(clean_inputs, **TRACER_KWARGS), torch.no_grad():
         for submodule in submodules:
@@ -136,7 +148,9 @@ def attribution_patching(
                         },
                     )
                     debug_step = True
+                print("attribution_patching invoke pre", {"step": step, "alpha": alpha})
                 with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
+                    print("attribution_patching invoke in", {"step": step, "alpha": alpha})
                     if is_tuple[submodule]:
                         submodule.output[0][:] = dictionary.decode(f.act) + f.res
                     else:
