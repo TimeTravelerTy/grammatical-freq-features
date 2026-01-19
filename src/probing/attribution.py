@@ -109,6 +109,7 @@ def attribution_patching(
                 if hasattr(probe, "to"):
                     probe = probe.to(x.device)
             f = dictionary.encode(x)
+            f = f.to(dtype=next(dictionary.parameters()).dtype)
             x_hat = dictionary.decode(f)
             residual = x - x_hat
             hidden_states_clean[submodule] = SparseActivation(act=f.save(), res=residual.save())
