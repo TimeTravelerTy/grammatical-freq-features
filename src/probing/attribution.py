@@ -139,8 +139,9 @@ def attribution_patching(
         alphas = torch.linspace(0, 1, steps, device=dict_device).view(steps, 1, 1)
         f_act = ((1 - alphas) * clean_act + alphas * patch_act)
         f_res = ((1 - alphas) * clean_res + alphas * patch_res)
-        f_act = f_act.to(dict_device).detach().requires_grad_(True)
-        f_res = f_res.to(dict_device).detach().requires_grad_(True)
+        dict_dtype = next(dictionary.parameters()).dtype
+        f_act = f_act.to(dict_device, dtype=dict_dtype).detach().requires_grad_(True)
+        f_res = f_res.to(dict_device, dtype=dict_dtype).detach().requires_grad_(True)
 
         input_ids = clean_inputs["input_ids"]
         attention_mask = clean_inputs["attention_mask"]
