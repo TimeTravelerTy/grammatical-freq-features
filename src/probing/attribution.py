@@ -126,9 +126,19 @@ def attribution_patching(
         patch_state = hidden_states_patch[submodule]
         dict_device = next(dictionary.parameters()).device
 
-        alphas = torch.linspace(0, 1, steps, device=dict_device).view(steps, 1, 1, 1)
-        f_act = ((1 - alphas) * clean_state.act.unsqueeze(0) + alphas * patch_state.act.unsqueeze(0))
-        f_res = ((1 - alphas) * clean_state.res.unsqueeze(0) + alphas * patch_state.res.unsqueeze(0))
+        clean_act = clean_state.act
+        clean_res = clean_state.res
+        patch_act = patch_state.act
+        patch_res = patch_state.res
+        if clean_act.dim() >= 3 and clean_act.shape[0] == 1:
+            clean_act = clean_act.squeeze(0)
+            clean_res = clean_res.squeeze(0)
+            patch_act = patch_act.squeeze(0)
+            patch_res = patch_res.squeeze(0)
+
+        alphas = torch.linspace(0, 1, steps, device=dict_device).view(steps, 1, 1)
+        f_act = ((1 - alphas) * clean_act + alphas * patch_act)
+        f_res = ((1 - alphas) * clean_res + alphas * patch_res)
         f_act = f_act.to(dict_device).detach().requires_grad_(True)
         f_res = f_res.to(dict_device).detach().requires_grad_(True)
 
