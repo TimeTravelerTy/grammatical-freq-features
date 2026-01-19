@@ -235,7 +235,14 @@ def attribution_patching_loop(dataset, model, torch_probe, submodule, autoencode
             padding=False,
             return_attention_mask=True,
         )
-        e, _, _, _ = attribution_patching(tokens, model, torch_probe, [submodule], {submodule: autoencoder})
+        e, _, _, _ = attribution_patching(
+            tokens,
+            model,
+            torch_probe,
+            [submodule],
+            {submodule: autoencoder},
+            metric_kwargs={"_debug_trace": True},
+        )
         if submodule not in effects:
             effects[submodule] = e[submodule].sum(dim=0)
         else:
