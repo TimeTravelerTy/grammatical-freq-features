@@ -81,9 +81,9 @@ def attribution_patching(
         else:
             acts_gathered = acts
         if hasattr(probe, "parameters"):
-            probe_device = next(probe.parameters()).device
-            acts_gathered = acts_gathered.to(probe_device)
-        metric = - probe(acts_gathered.float())
+            probe_param = next(probe.parameters())
+            acts_gathered = acts_gathered.to(probe_param.device, dtype=probe_param.dtype)
+        metric = - probe(acts_gathered)
         return metric
     
     # first run through a test input to figure out which hidden states are tuples
