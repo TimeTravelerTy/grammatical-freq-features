@@ -125,31 +125,43 @@ def attribution_patching(
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
         dict_device = next(dictionary.parameters()).device
-        act_grad_sum = None
-        res_grad_sum = None
-        for step in range(steps):
-            alpha = step / steps
-            f = (1 - alpha) * clean_state + alpha * patch_state
-            f_act = f.act.to(dict_device).detach().clone().requires_grad_(True)
-            f_res = f.res.to(dict_device).detach().clone().requires_grad_(True)
-            f = SparseActivation(act=f_act, res=f_res)
-            with model.trace(clean_inputs, **TRACER_KWARGS):
-                if is_tuple[submodule]:
-                    submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                else:
-                    submodule.output = dictionary.decode(f.act) + f.res
-                metric = metric_fn(model, submodule, probe, **metric_kwargs)
-                metric.sum().backward()
-            if f.act.grad is None or f.res.grad is None:
-                raise RuntimeError("Missing gradients for attribution patching step.")
-            if act_grad_sum is None:
-                act_grad_sum = f.act.grad
-                res_grad_sum = f.res.grad
+
+        alphas = torch.linspace(0, 1, steps, device=dict_device).view(steps, 1, 1, 1)
+        f_act = ((1 - alphas) * clean_state.act.unsqueeze(0) + alphas * patch_state.act.unsqueeze(0))
+        f_res = ((1 - alphas) * clean_state.res.unsqueeze(0) + alphas * patch_state.res.unsqueeze(0))
+        f_act = f_act.to(dict_device).detach().requires_grad_(True)
+        f_res = f_res.to(dict_device).detach().requires_grad_(True)
+
+        input_ids = clean_inputs["input_ids"]
+        attention_mask = clean_inputs["attention_mask"]
+        batch_inputs = {
+            "input_ids": input_ids.repeat(steps, 1),
+            "attention_mask": attention_mask.repeat(steps, 1),
+        }
+
+        print(
+            "attribution_patching batched",
+            {
+                "steps": steps,
+                "input_shape": tuple(batch_inputs["input_ids"].shape),
+                "f_act_shape": tuple(f_act.shape),
+                "f_res_shape": tuple(f_res.shape),
+            },
+        )
+
+        with model.trace(batch_inputs, **TRACER_KWARGS):
+            if is_tuple[submodule]:
+                submodule.output[0][:] = dictionary.decode(f_act) + f_res
             else:
-                act_grad_sum = act_grad_sum + f.act.grad
-                res_grad_sum = res_grad_sum + f.res.grad
-        mean_grad = act_grad_sum / steps
-        mean_residual_grad = res_grad_sum / steps
+                submodule.output = dictionary.decode(f_act) + f_res
+            metric = metric_fn(model, submodule, probe, **metric_kwargs)
+            metric.sum().backward()
+
+        if f_act.grad is None or f_res.grad is None:
+            raise RuntimeError("Missing gradients for attribution patching batch.")
+
+        mean_grad = f_act.grad.mean(dim=0)
+        mean_residual_grad = f_res.grad.mean(dim=0)
         grad = SparseActivation(act=mean_grad, res=mean_residual_grad)
         delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
         effect = grad @ delta

@@ -229,6 +229,8 @@ def attribution_patching_loop(dataset, model, torch_probe, submodule, autoencode
     for i, example in enumerate(tqdm(dataloader, desc="Attribution patching")):
         if i >= 128:
             break
+        if i > 0 and i % 8 == 0:
+            print(f"Attribution patching: processed {i} examples")
         tokens = model.tokenizer(
             example["sentence"][0],
             return_tensors="pt",
