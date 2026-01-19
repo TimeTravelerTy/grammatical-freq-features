@@ -94,7 +94,7 @@ def attribution_patching(
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
-        with model.trace(**TRACER_KWARGS) as tracer:
+        with model.trace(clean_inputs, **TRACER_KWARGS) as tracer:
             metrics = []
             fs = []
             step_count = 0
@@ -105,34 +105,13 @@ def attribution_patching(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                try:
-                    with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
-                        if is_tuple[submodule]:
-                            submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                        else:
-                            submodule.output = dictionary.decode(f.act) + f.res
-                        metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
-                except Exception as exc:
-                    print(
-                        "attribution_patching invoke exception",
-                        {
-                            "step": step,
-                            "steps": steps,
-                            "clean_prefix_shape": tuple(clean_prefix.shape) if hasattr(clean_prefix, "shape") else None,
-                            "exception": str(exc),
-                        },
-                    )
-                    raise
+                with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
+                    if is_tuple[submodule]:
+                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                    else:
+                        submodule.output = dictionary.decode(f.act) + f.res
+                    metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
             if not metrics:
-                print(
-                    "attribution_patching debug: no metrics collected",
-                    {
-                        "steps": steps,
-                        "step_count": step_count,
-                        "clean_prefix_shape": tuple(clean_prefix.shape) if hasattr(clean_prefix, "shape") else None,
-                        "is_mapping_input": False,
-                    },
-                )
                 raise RuntimeError("No metrics collected; check steps and tracing inputs.")
             metric = metrics[0]
             for m in metrics[1:]:
