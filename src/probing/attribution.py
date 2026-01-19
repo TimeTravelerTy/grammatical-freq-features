@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 import torch
 
 from src.activations import SparseActivation
@@ -45,42 +44,7 @@ def attribution_patching(
     if steps < 1:
         steps = 1
 
-    def is_text_input(value):
-        if isinstance(value, str):
-            return True
-        if isinstance(value, (list, tuple)) and value:
-            return all(isinstance(item, str) for item in value)
-        return False
-
-    text_input = is_text_input(clean_prefix)
-
-    def get_input_value(inputs, key):
-        if isinstance(inputs, Mapping):
-            return inputs.get(key)
-        if hasattr(inputs, "data") and isinstance(inputs.data, dict):
-            return inputs.data.get(key)
-        try:
-            return inputs[key] if key in inputs else None
-        except Exception:
-            return None
-
-    if text_input:
-        input_ids = None
-    else:
-        input_ids = get_input_value(clean_prefix, "input_ids")
-    attention_mask = None if input_ids is None else get_input_value(clean_prefix, "attention_mask")
-    if input_ids is not None:
-        input_ids = input_ids if input_ids.dim() > 1 else torch.cat([input_ids], dim=0)
-        input_ids = input_ids.to(device)
-        if attention_mask is not None:
-            attention_mask = attention_mask if attention_mask.dim() > 1 else torch.cat([attention_mask], dim=0)
-            attention_mask = attention_mask.to(device)
-            clean_prefix = {"input_ids": input_ids, "attention_mask": attention_mask}
-        else:
-            clean_prefix = input_ids
-    elif not text_input:
-        clean_prefix = clean_prefix if clean_prefix.dim() > 1 else torch.cat([clean_prefix], dim=0)
-        clean_prefix = clean_prefix.to(device)
+    clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
@@ -95,8 +59,7 @@ def attribution_patching(
             is_tuple[submodule] = True # type(submodule.output) == tuple
 
     hidden_states_clean = {}
-    trace_kwargs = TRACER_KWARGS if not text_input else {}
-    with model.trace(clean_prefix, **trace_kwargs), torch.no_grad():
+    with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]
             x = submodule.output
@@ -136,20 +99,12 @@ def attribution_patching(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                if text_input:
-                    with tracer.invoke(clean_prefix):
-                        if is_tuple[submodule]:
-                            submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                        else:
-                            submodule.output = dictionary.decode(f.act) + f.res
-                        metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
-                else:
-                    with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
-                        if is_tuple[submodule]:
-                            submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                        else:
-                            submodule.output = dictionary.decode(f.act) + f.res
-                        metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
+                with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
+                    if is_tuple[submodule]:
+                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                    else:
+                        submodule.output = dictionary.decode(f.act) + f.res
+                    metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
             if not metrics:
                 raise RuntimeError("No metrics collected; check steps and tracing inputs.")
             metric = metrics[0]
