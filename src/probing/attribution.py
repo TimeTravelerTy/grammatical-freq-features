@@ -117,6 +117,7 @@ def attribution_patching(
             step_count = 0
             appended = False
             debug_step = False
+            debug_invoke = False
             for step in range(steps):
                 step_count += 1
                 alpha = step / steps
@@ -140,6 +141,17 @@ def attribution_patching(
                         submodule.output[0][:] = dictionary.decode(f.act) + f.res
                     else:
                         submodule.output = dictionary.decode(f.act) + f.res
+                    if not debug_invoke:
+                        print(
+                            "attribution_patching invoke entered",
+                            {
+                                "step": step,
+                                "alpha": alpha,
+                                "f_act_shape": tuple(f.act.shape) if hasattr(f.act, "shape") else None,
+                                "decoded_shape": tuple(dictionary.decode(f.act).shape),
+                            },
+                        )
+                        debug_invoke = True
                     metric_val = metric_fn(model, submodule, probe, **metric_kwargs)
                     metrics.append(metric_val)
                     if not appended:
