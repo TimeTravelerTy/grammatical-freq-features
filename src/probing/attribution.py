@@ -69,7 +69,26 @@ def attribution_patching(
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
-        acts_gathered = submodule.output[0].sum(1)
+        acts = submodule.output[0]
+        n_features = probe.linear.weight.shape[1]
+        if acts.dim() == 3:
+            if acts.shape[-1] == n_features:
+                acts_gathered = acts.sum(1)
+            elif acts.shape[-2] == n_features:
+                acts_gathered = acts.sum(-1)
+            else:
+                acts_gathered = acts.sum(1)
+        else:
+            acts_gathered = acts
+        if metric_kwargs.get("_debug_trace", False):
+            print(
+                "attribution_patching metric shape",
+                {
+                    "acts_shape": tuple(acts.shape),
+                    "gathered_shape": tuple(acts_gathered.shape),
+                    "n_features": int(n_features),
+                },
+            )
         if hasattr(probe, "parameters"):
             probe_device = next(probe.parameters()).device
             acts_gathered = acts_gathered.to(probe_device)
