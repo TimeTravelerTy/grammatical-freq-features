@@ -45,7 +45,6 @@ def attribution_patching(
         steps = 1
 
     clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
-        input_debug["clean_prefix_shape"] = tuple(clean_prefix.shape)
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
