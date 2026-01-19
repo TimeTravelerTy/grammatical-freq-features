@@ -94,7 +94,7 @@ def attribution_patching(
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
-        with model.trace(clean_inputs, **TRACER_KWARGS) as tracer:
+        with model.trace(**TRACER_KWARGS) as tracer:
             metrics = []
             fs = []
             step_count = 0
