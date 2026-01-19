@@ -44,7 +44,27 @@ def attribution_patching(
     if steps < 1:
         steps = 1
 
-    clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
+    if isinstance(clean_prefix, dict):
+        input_ids = clean_prefix.get("input_ids")
+        attention_mask = clean_prefix.get("attention_mask")
+        if input_ids is None:
+            raise KeyError("input_ids")
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        elif attention_mask.dim() == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+        clean_inputs = {
+            "input_ids": input_ids.to(device),
+            "attention_mask": attention_mask.to(device),
+        }
+    else:
+        clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
+        clean_inputs = {
+            "input_ids": clean_prefix,
+            "attention_mask": torch.ones_like(clean_prefix, device=device),
+        }
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
@@ -59,7 +79,7 @@ def attribution_patching(
             is_tuple[submodule] = True # type(submodule.output) == tuple
 
     hidden_states_clean = {}
-    with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
+    with model.trace(clean_inputs, **TRACER_KWARGS), torch.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]
             x = submodule.output
@@ -102,12 +122,24 @@ def attribution_patching(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
+                with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
                     if is_tuple[submodule]:
                         submodule.output[0][:] = dictionary.decode(f.act) + f.res
                     else:
                         submodule.output = dictionary.decode(f.act) + f.res
-                    metrics.append(metric_fn(model, submodule, probe, **metric_kwargs))
+                    metric_val = metric_fn(model, submodule, probe, **metric_kwargs)
+                    metrics.append(metric_val)
+                    if not appended:
+                        print(
+                            "attribution_patching append",
+                            {
+                                "step": step,
+                                "alpha": alpha,
+                                "metric_shape": tuple(metric_val.shape) if hasattr(metric_val, "shape") else None,
+                                "input_ids_shape": tuple(clean_inputs["input_ids"].shape),
+                                "attention_mask_shape": tuple(clean_inputs["attention_mask"].shape),
+                            },
+                        )
                     appended = True
             if not appended:
                 raise RuntimeError(f"No metrics collected; steps={steps}, step_count={step_count}, shape={tuple(clean_prefix.shape)}")
