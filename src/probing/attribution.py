@@ -116,6 +116,7 @@ def attribution_patching(
             fs = []
             step_count = 0
             appended = False
+            debug_step = False
             for step in range(steps):
                 step_count += 1
                 alpha = step / steps
@@ -123,6 +124,17 @@ def attribution_patching(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
+                if not debug_step:
+                    print(
+                        "attribution_patching step entry",
+                        {
+                            "step": step,
+                            "steps": steps,
+                            "clean_ids_shape": tuple(clean_inputs["input_ids"].shape),
+                            "mask_shape": tuple(clean_inputs["attention_mask"].shape),
+                        },
+                    )
+                    debug_step = True
                 with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
                     if is_tuple[submodule]:
                         submodule.output[0][:] = dictionary.decode(f.act) + f.res
@@ -143,7 +155,12 @@ def attribution_patching(
                         )
                     appended = True
             if not appended:
-                raise RuntimeError(f"No metrics collected; steps={steps}, step_count={step_count}, shape={tuple(clean_prefix.shape)}")
+                ids_shape = tuple(clean_inputs["input_ids"].shape)
+                mask_shape = tuple(clean_inputs["attention_mask"].shape)
+                raise RuntimeError(
+                    f"No metrics collected; steps={steps}, step_count={step_count}, "
+                    f"input_ids_shape={ids_shape}, attention_mask_shape={mask_shape}"
+                )
             metric = metrics[0]
             for m in metrics[1:]:
                 metric = metric + m
