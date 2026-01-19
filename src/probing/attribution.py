@@ -80,15 +80,6 @@ def attribution_patching(
                 acts_gathered = acts.sum(1)
         else:
             acts_gathered = acts
-        if metric_kwargs.get("_debug_trace", False):
-            print(
-                "attribution_patching metric shape",
-                {
-                    "acts_shape": tuple(acts.shape),
-                    "gathered_shape": tuple(acts_gathered.shape),
-                    "n_features": int(n_features),
-                },
-            )
         if hasattr(probe, "parameters"):
             probe_device = next(probe.parameters()).device
             acts_gathered = acts_gathered.to(probe_device)
@@ -100,18 +91,6 @@ def attribution_patching(
     with model.trace("_", **TRACER_KWARGS):
         for submodule in submodules:
             is_tuple[submodule] = True # type(submodule.output) == tuple
-
-    if metric_kwargs.get("_debug_trace", False):
-        with model.trace(clean_inputs, **TRACER_KWARGS):
-            test_metric = metric_fn(model, submodules[0], probe).save()
-        print(
-            "attribution_patching trace sanity",
-            {
-                "metric_shape": tuple(test_metric.value.shape) if hasattr(test_metric.value, "shape") else None,
-                "input_ids_shape": tuple(clean_inputs["input_ids"].shape),
-                "attention_mask_shape": tuple(clean_inputs["attention_mask"].shape),
-            },
-        )
 
     hidden_states_clean = {}
     with model.trace(clean_inputs, **TRACER_KWARGS), torch.no_grad():
@@ -145,77 +124,32 @@ def attribution_patching(
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
-        with model.trace(**TRACER_KWARGS) as tracer:
-            metrics = []
-            fs = []
-            step_count = 0
-            appended = False
-            debug_step = False
-            debug_invoke = False
-            for step in range(steps):
-                step_count += 1
-                alpha = step / steps
-                f = (1 - alpha) * clean_state + alpha * patch_state
-                f.act.retain_grad()
-                f.res.retain_grad()
-                fs.append(f)
-                if not debug_step:
-                    print(
-                        "attribution_patching step entry",
-                        {
-                            "step": step,
-                            "steps": steps,
-                            "clean_ids_shape": tuple(clean_inputs["input_ids"].shape),
-                            "mask_shape": tuple(clean_inputs["attention_mask"].shape),
-                        },
-                    )
-                    debug_step = True
-                print("attribution_patching invoke pre", {"step": step, "alpha": alpha})
-                with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
-                    print("attribution_patching invoke in", {"step": step, "alpha": alpha})
-                    if is_tuple[submodule]:
-                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
-                    else:
-                        submodule.output = dictionary.decode(f.act) + f.res
-                    if not debug_invoke:
-                        print(
-                            "attribution_patching invoke entered",
-                            {
-                                "step": step,
-                                "alpha": alpha,
-                                "f_act_shape": tuple(f.act.shape) if hasattr(f.act, "shape") else None,
-                                "decoded_shape": tuple(dictionary.decode(f.act).shape),
-                            },
-                        )
-                        debug_invoke = True
-                    metric_val = metric_fn(model, submodule, probe, **metric_kwargs)
-                    metrics.append(metric_val)
-                    if not appended:
-                        print(
-                            "attribution_patching append",
-                            {
-                                "step": step,
-                                "alpha": alpha,
-                                "metric_shape": tuple(metric_val.shape) if hasattr(metric_val, "shape") else None,
-                                "input_ids_shape": tuple(clean_inputs["input_ids"].shape),
-                                "attention_mask_shape": tuple(clean_inputs["attention_mask"].shape),
-                            },
-                        )
-                    appended = True
-            if not appended:
-                ids_shape = tuple(clean_inputs["input_ids"].shape)
-                mask_shape = tuple(clean_inputs["attention_mask"].shape)
-                raise RuntimeError(
-                    f"No metrics collected; steps={steps}, step_count={step_count}, "
-                    f"input_ids_shape={ids_shape}, attention_mask_shape={mask_shape}"
-                )
-            metric = metrics[0]
-            for m in metrics[1:]:
-                metric = metric + m
-            metric.sum().backward(retain_graph=True) 
-
-        mean_grad = sum([f.act.grad for f in fs]) / steps
-        mean_residual_grad = sum([f.res.grad for f in fs]) / steps
+        dict_device = next(dictionary.parameters()).device
+        act_grad_sum = None
+        res_grad_sum = None
+        for step in range(steps):
+            alpha = step / steps
+            f = (1 - alpha) * clean_state + alpha * patch_state
+            f_act = f.act.to(dict_device).detach().clone().requires_grad_(True)
+            f_res = f.res.to(dict_device).detach().clone().requires_grad_(True)
+            f = SparseActivation(act=f_act, res=f_res)
+            with model.trace(clean_inputs, **TRACER_KWARGS):
+                if is_tuple[submodule]:
+                    submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                else:
+                    submodule.output = dictionary.decode(f.act) + f.res
+                metric = metric_fn(model, submodule, probe, **metric_kwargs)
+                metric.sum().backward()
+            if f.act.grad is None or f.res.grad is None:
+                raise RuntimeError("Missing gradients for attribution patching step.")
+            if act_grad_sum is None:
+                act_grad_sum = f.act.grad
+                res_grad_sum = f.res.grad
+            else:
+                act_grad_sum = act_grad_sum + f.act.grad
+                res_grad_sum = res_grad_sum + f.res.grad
+        mean_grad = act_grad_sum / steps
+        mean_residual_grad = res_grad_sum / steps
         grad = SparseActivation(act=mean_grad, res=mean_residual_grad)
         delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
         effect = grad @ delta
