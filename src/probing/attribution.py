@@ -45,6 +45,10 @@ def attribution_patching(
         steps = 1
 
     clean_prefix = torch.cat([clean_prefix], dim=0).to(device)
+    clean_inputs = {
+        "input_ids": clean_prefix,
+        "attention_mask": torch.ones_like(clean_prefix, device=device),
+    }
 
     def metric_fn(model, submodule, probe):
         # Metric for attribution patching: Negative logit of label 1
@@ -59,7 +63,7 @@ def attribution_patching(
             is_tuple[submodule] = True # type(submodule.output) == tuple
 
     hidden_states_clean = {}
-    with model.trace(clean_prefix, **TRACER_KWARGS), torch.no_grad():
+    with model.trace(clean_inputs, **TRACER_KWARGS), torch.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]
             x = submodule.output
@@ -102,7 +106,7 @@ def attribution_patching(
                 f.res.retain_grad()
                 fs.append(f)
                 try:
-                    with tracer.invoke(clean_prefix, scan=TRACER_KWARGS['scan']):
+                    with tracer.invoke(clean_inputs, scan=TRACER_KWARGS['scan']):
                         if is_tuple[submodule]:
                             submodule.output[0][:] = dictionary.decode(f.act) + f.res
                         else:
