@@ -4,12 +4,54 @@ import os
 
 import torch
 from nnsight import LanguageModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import HF_TOKEN
 from src.utils import setup_autoencoder
 
 
 TRACER_KWARGS = {'scan': False, 'validate': False}
+
+
+def _has_meta_params(module):
+    for param in module.parameters():
+        if param.device.type == "meta":
+            return True
+    return False
+
+
+def _build_model_with_transformers(model_name, device_map, torch_dtype):
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        padding_side="left",
+        token=HF_TOKEN,
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=False,
+        token=HF_TOKEN,
+    )
+    if device_map not in ["auto", None]:
+        hf_model.to(device_map)
+    hf_model.eval()
+    return LanguageModel(hf_model, tokenizer=tokenizer)
+
+
+def resolve_submodule_device(model, submodule, fallback=None):
+    for param in submodule.parameters():
+        if param.device.type != "meta":
+            return param.device
+    model_root = getattr(model, "model", model)
+    for param in model_root.parameters():
+        if param.device.type != "meta":
+            return param.device
+    if isinstance(fallback, torch.device):
+        return fallback
+    if isinstance(fallback, str) and (fallback == "cpu" or fallback.startswith("cuda")):
+        return torch.device(fallback)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_freqblimp_examples(path, n):
@@ -63,7 +105,7 @@ def main():
     parser.add_argument("--freqblimp_file", type=str, default="data/freqBLiMP/freqBLiMP_xtail.jsonl")
     parser.add_argument("--concepts_file", type=str, default="data/concepts.json")
     parser.add_argument("--autoencoder_path", type=str, default="autoencoders/llama-3-8b-layer16.pt")
-    parser.add_argument("--device", type=str, default="cpu", help="cpu or auto/cuda")
+    parser.add_argument("--device", type=str, default="cuda", help="cuda/cpu/auto (cuda default enforces GPU)")
     parser.add_argument("--layer", type=int, default=16)
     parser.add_argument("--num_examples", type=int, default=2)
     parser.add_argument("--variant", type=str, default="good_original",
@@ -101,10 +143,35 @@ def main():
     if not HF_TOKEN:
         print("WARNING: HF_TOKEN is empty; you may need to set it in src/config.py or via env.")
 
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but not available; pass --device cpu or use a GPU node.")
+
     torch_dtype = torch.float32 if args.device == "cpu" else torch.float16
-    model = LanguageModel(args.model_name, torch_dtype=torch_dtype, device_map=args.device, token=HF_TOKEN)
+    model = None
+    model_device_map = None if args.device in ["cuda", "cuda:0", "cpu"] else args.device
+    try:
+        model = LanguageModel(
+            args.model_name,
+            torch_dtype=torch_dtype,
+            device_map=model_device_map,
+            token=HF_TOKEN,
+            low_cpu_mem_usage=False if model_device_map is None else True,
+        )
+        if model_device_map is None:
+            try:
+                model.to(args.device)
+            except Exception:
+                pass
+        if _has_meta_params(model.model):
+            model = _build_model_with_transformers(args.model_name, args.device, torch_dtype)
+    except Exception:
+        model = _build_model_with_transformers(args.model_name, args.device, torch_dtype)
+    if _has_meta_params(model.model):
+        raise RuntimeError("Model parameters are still on meta device after loading; check device/device_map.")
+
     submodule = model.model.layers[args.layer]
-    autoencoder = setup_autoencoder(checkpoint_path=args.autoencoder_path, device=args.device)
+    ae_device = resolve_submodule_device(model, submodule, fallback=args.device)
+    autoencoder = setup_autoencoder(checkpoint_path=args.autoencoder_path, device=ae_device)
 
     concept_features = load_concept_feature_indices(
         args.features_dir, args.concept_key, args.concept_value, args.language, args.topk
