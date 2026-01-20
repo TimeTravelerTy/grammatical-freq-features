@@ -2,6 +2,7 @@ import argparse
 import heapq
 import json
 import os
+import time
 from itertools import count
 
 import torch
@@ -119,6 +120,8 @@ def main():
                         help="Top sentences to keep per feature (0 disables ranking mode).")
     parser.add_argument("--include_special_tokens", action="store_true",
                         help="Include special tokens when locating max activation.")
+    parser.add_argument("--log_every", type=int, default=100,
+                        help="Log progress every N examples (0 disables).")
     parser.add_argument("--concept_key", type=str, default=None)
     parser.add_argument("--concept_value", type=str, default=None)
     parser.add_argument("--language", type=str, default="English")
@@ -179,6 +182,19 @@ def main():
     ae_device = resolve_submodule_device(model, submodule, fallback=args.device)
     autoencoder = setup_autoencoder(checkpoint_path=args.autoencoder_path, device=ae_device)
 
+    def _dev(mod):
+        try:
+            return next(mod.parameters()).device
+        except Exception:
+            return None
+
+    print("CUDA available:", torch.cuda.is_available())
+    print("Model param device:", _dev(model.model))
+    print("Submodule param device:", _dev(submodule))
+    print("AE param device:", _dev(autoencoder))
+    print(f"Examples loaded: {len(examples)}")
+    print(f"Variants: {', '.join(variants)}")
+
     concept_features = load_concept_feature_indices(
         args.features_dir, args.concept_key, args.concept_value, args.language, args.topk
     )
@@ -193,6 +209,8 @@ def main():
         special_ids = set(model.tokenizer.all_special_ids)
         heaps = {idx: [] for idx in concept_features}
         counter = count()
+        start = time.time()
+        last_log = start
 
         def push_top(heap, score, meta, limit):
             if limit <= 0:
@@ -203,7 +221,13 @@ def main():
             elif score > heap[0][0]:
                 heapq.heapreplace(heap, entry)
 
-        for ex in examples:
+        for ex_i, ex in enumerate(examples, start=1):
+            if args.log_every and ex_i % args.log_every == 0:
+                now = time.time()
+                elapsed = now - last_log
+                total = now - start
+                print(f"Processed {ex_i}/{len(examples)} examples (+{elapsed:.1f}s, total {total:.1f}s)")
+                last_log = now
             for variant in variants:
                 sentence = ex.get(variant)
                 if not sentence:
