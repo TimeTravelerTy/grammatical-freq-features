@@ -1,6 +1,8 @@
 import argparse
+import heapq
 import json
 import os
+from itertools import count
 
 import torch
 from nnsight import LanguageModel
@@ -62,7 +64,7 @@ def load_freqblimp_examples(path, n):
             if not line:
                 continue
             examples.append(json.loads(line))
-            if len(examples) >= n:
+            if n is not None and n > 0 and len(examples) >= n:
                 break
     return examples
 
@@ -113,6 +115,10 @@ def main():
     parser.add_argument("--variants", type=str, default=None,
                         help="Comma-separated list of variants (overrides --variant)")
     parser.add_argument("--topk", type=int, default=32)
+    parser.add_argument("--top_sentences", type=int, default=5,
+                        help="Top sentences to keep per feature (0 disables ranking mode).")
+    parser.add_argument("--include_special_tokens", action="store_true",
+                        help="Include special tokens when locating max activation.")
     parser.add_argument("--concept_key", type=str, default=None)
     parser.add_argument("--concept_value", type=str, default=None)
     parser.add_argument("--language", type=str, default="English")
@@ -176,6 +182,91 @@ def main():
     concept_features = load_concept_feature_indices(
         args.features_dir, args.concept_key, args.concept_value, args.language, args.topk
     )
+    if concept_features:
+        concept_features = [idx for idx in concept_features if idx < autoencoder.dict_size]
+        if not concept_features:
+            raise RuntimeError("No concept features fall within the autoencoder dictionary size.")
+
+    if concept_features and args.top_sentences > 0:
+        top_n = args.top_sentences
+        include_special_tokens = args.include_special_tokens
+        special_ids = set(model.tokenizer.all_special_ids)
+        heaps = {idx: [] for idx in concept_features}
+        counter = count()
+
+        def push_top(heap, score, meta, limit):
+            if limit <= 0:
+                return
+            entry = (score, next(counter), meta)
+            if len(heap) < limit:
+                heapq.heappush(heap, entry)
+            elif score > heap[0][0]:
+                heapq.heapreplace(heap, entry)
+
+        for ex in examples:
+            for variant in variants:
+                sentence = ex.get(variant)
+                if not sentence:
+                    continue
+                tokenized = model.tokenizer(sentence, return_tensors="pt", padding=False)
+                input_ids = tokenized["input_ids"]
+                if input_ids.dim() == 1:
+                    input_ids = input_ids.unsqueeze(0)
+                token_ids = input_ids[0].tolist()
+                token_strings = model.tokenizer.convert_ids_to_tokens(token_ids)
+                if hasattr(model, "device"):
+                    input_ids = input_ids.to(model.device)
+                with model.trace(input_ids, **TRACER_KWARGS), torch.no_grad():
+                    internal_acts = submodule.output[0].save()
+                acts = internal_acts
+                if hasattr(acts, "dim"):
+                    if acts.dim() == 3:
+                        acts = acts[0]
+                    elif acts.dim() != 2:
+                        raise RuntimeError(f"Unexpected activations shape: {tuple(acts.shape)}")
+                ae_device = next(autoencoder.parameters()).device
+                acts = acts.to(ae_device)
+                feats = autoencoder.encode(acts)
+                if feats.dim() != 2 or feats.numel() == 0:
+                    continue
+                vals = feats[:, concept_features]
+                if not include_special_tokens and special_ids:
+                    mask = torch.tensor([tid in special_ids for tid in token_ids], device=vals.device)
+                    if mask.any():
+                        vals = vals.clone()
+                        vals[mask, :] = float("-inf")
+                max_vals, max_pos = vals.max(dim=0)
+                max_vals = max_vals.detach().cpu().tolist()
+                max_pos = max_pos.detach().cpu().tolist()
+                for feat_idx, val, pos in zip(concept_features, max_vals, max_pos):
+                    if val == float("-inf"):
+                        continue
+                    token = token_strings[pos] if 0 <= pos < len(token_strings) else None
+                    meta = {
+                        "sentence": sentence,
+                        "variant": variant,
+                        "group": ex.get("group"),
+                        "subtask": ex.get("subtask"),
+                        "idx": ex.get("idx"),
+                        "token": token,
+                        "token_pos": pos,
+                    }
+                    push_top(heaps[feat_idx], val, meta, top_n)
+
+        print(f"\nTop {top_n} sentences per feature:")
+        for feat_idx in concept_features:
+            print(f"\nFeature {feat_idx}:")
+            heap = heaps.get(feat_idx, [])
+            if not heap:
+                print("  (no matches)")
+                continue
+            for score, _, meta in sorted(heap, key=lambda x: x[0], reverse=True):
+                token = meta.get("token")
+                token_pos = meta.get("token_pos")
+                header = f"[{meta.get('group')}:{meta.get('subtask')}] idx={meta.get('idx')} {meta.get('variant')}"
+                print(f"  {score:.4f} {header} token={token} pos={token_pos}")
+                print(f"    {meta.get('sentence')}")
+        return
 
     for ex in examples:
         header = f"[{ex.get('group')}:{ex.get('subtask')}] idx={ex.get('idx')}"
@@ -185,16 +276,35 @@ def main():
             if not sentence:
                 continue
             tokens = model.tokenizer(sentence, return_tensors="pt", padding=False).input_ids
+            if tokens.dim() == 1:
+                tokens = tokens.unsqueeze(0)
             if hasattr(model, "device"):
                 tokens = tokens.to(model.device)
             with model.trace(tokens, **TRACER_KWARGS), torch.no_grad():
                 internal_acts = submodule.output[0].save()
-            acts = internal_acts[0].to(autoencoder.device)
+            acts = internal_acts
+            if hasattr(acts, "dim"):
+                if acts.dim() == 3:
+                    acts = acts[0]
+                elif acts.dim() != 2:
+                    raise RuntimeError(f"Unexpected activations shape: {tuple(acts.shape)}")
+            ae_device = next(autoencoder.parameters()).device
+            acts = acts.to(ae_device)
             feats = autoencoder.encode(acts)
-            feat_max = feats.max(dim=0).values.detach().cpu()
+            if feats.dim() == 1:
+                feat_max = feats.detach().cpu()
+            else:
+                feat_max = feats.max(dim=0).values.detach().cpu()
+            if feat_max.numel() == 0:
+                print("    WARNING: empty feature vector; check autoencoder checkpoint/device.")
+                continue
 
             if concept_features:
-                values = [(idx, feat_max[idx].item()) for idx in concept_features]
+                valid = [idx for idx in concept_features if idx < feat_max.numel()]
+                if not valid:
+                    print("    WARNING: no concept features within autoencoder dictionary size.")
+                    continue
+                values = [(idx, feat_max[idx].item()) for idx in valid]
                 values.sort(key=lambda x: x[1], reverse=True)
                 k = min(args.topk, len(values))
                 print(f"  {variant}: {sentence}")
