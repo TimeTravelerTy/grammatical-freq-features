@@ -153,15 +153,16 @@ def attribution_patching(
             "attention_mask": attention_mask.repeat(steps, 1),
         }
 
-        print(
-            "attribution_patching batched",
-            {
-                "steps": steps,
-                "input_shape": tuple(batch_inputs["input_ids"].shape),
-                "f_act_shape": tuple(f_act.shape),
-                "f_res_shape": tuple(f_res.shape),
-            },
-        )
+        if metric_kwargs.get("_log_batch", False):
+            print(
+                "attribution_patching batched",
+                {
+                    "steps": steps,
+                    "input_shape": tuple(batch_inputs["input_ids"].shape),
+                    "f_act_shape": tuple(f_act.shape),
+                    "f_res_shape": tuple(f_res.shape),
+                },
+            )
 
         with model.trace(batch_inputs, **TRACER_KWARGS):
             if is_tuple[submodule]:

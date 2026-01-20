@@ -163,6 +163,12 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
         
         probe = joblib.load(probe_file)
         torch_probe = convert_probe_to_pytorch(probe, device=resolve_device(model, submodule, autoencoder))
+        for p in torch_probe.parameters():
+            p.requires_grad_(False)
+        try:
+            print("Probe param device:", next(torch_probe.parameters()).device)
+        except Exception:
+            print("Probe param device:", None)
 
         # Prepare dataset
         train_dataset = prepare_dataset(
@@ -272,6 +278,21 @@ def feature_selection(args):
         torch_dtype=torch.float16 if args.device_map != "cpu" else torch.float32,
         load_with_transformers=args.load_with_transformers,
     )
+    for p in model.model.parameters():
+        p.requires_grad_(False)
+    for p in autoencoder.parameters():
+        p.requires_grad_(False)
+
+    def _dev(mod):
+        try:
+            return next(mod.parameters()).device
+        except Exception:
+            return None
+
+    print("CUDA available:", torch.cuda.is_available())
+    print("Model param device:", _dev(model.model))
+    print("Submodule param device:", _dev(submodule))
+    print("AE param device:", _dev(autoencoder))
     
     probe_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
     output_dir = f"outputs/probing/features/{'llama' if 'llama' in args.model_name else 'aya'}"
