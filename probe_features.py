@@ -63,27 +63,38 @@ def resolve_device(model, submodule, autoencoder):
             return param.device
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def _build_model_with_transformers(model_name, device_map, torch_dtype):
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        padding_side="left",
+        token=HF_TOKEN,
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        low_cpu_mem_usage=False,
+        token=HF_TOKEN,
+    )
+    if device_map not in ["auto", None]:
+        hf_model.to(device_map)
+    hf_model.eval()
+    return LanguageModel(hf_model, tokenizer=tokenizer)
+
+
+def _has_meta_params(module):
+    for param in module.parameters():
+        if param.device.type == "meta":
+            return True
+    return False
+
+
 def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16, load_with_transformers=False):
     """Set up the language model and autoencoder."""
     model = None
     if load_with_transformers:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            padding_side="left",
-            token=HF_TOKEN,
-        )
-        tokenizer.pad_token = tokenizer.eos_token
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=False,
-            token=HF_TOKEN,
-        )
-        if device_map not in ["auto", None]:
-            hf_model.to(device_map)
-        hf_model.eval()
         try:
-            model = LanguageModel(hf_model, tokenizer=tokenizer)
+            model = _build_model_with_transformers(model_name, device_map, torch_dtype)
         except Exception:
             model = None
     if model is None:
@@ -100,6 +111,10 @@ def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch
                 model.to(device_map)
             except Exception:
                 pass
+        if _has_meta_params(model.model):
+            model = _build_model_with_transformers(model_name, device_map, torch_dtype)
+    if _has_meta_params(model.model):
+        raise RuntimeError("Model parameters are still on meta device after loading; check device_map/model loading.")
     submodule = model.model.layers[16]
     ae_device = resolve_submodule_device(model, submodule, fallback=device_map)
     if "llama" in model_name:
