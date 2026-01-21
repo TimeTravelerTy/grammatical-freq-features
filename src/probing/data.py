@@ -45,14 +45,16 @@ class ProbingDataset(Dataset):
         self.load_data(conll_file)
 
     def load_data(self, conll_file):
-        data = pyconll.load_from_file(conll_file)
-        for sentence in data:
-            label = self.filter_criterion(sentence)
-            if label is None:
-                continue
-            label = 1 if label else 0
-            self.sentences.append(sentence.text)
-            self.labels.append(label)
+        conll_files = conll_file if isinstance(conll_file, (list, tuple)) else [conll_file]
+        for path in conll_files:
+            data = pyconll.load_from_file(path)
+            for sentence in data:
+                label = self.filter_criterion(sentence)
+                if label is None:
+                    continue
+                label = 1 if label else 0
+                self.sentences.append(sentence.text)
+                self.labels.append(label)
 
     def __len__(self):
         return len(self.sentences)

@@ -9,6 +9,13 @@ import os
 TRACER_KWARGS = {'scan': False, 'validate': False}
 
 
+def _iter_conll_sentences(conll_file):
+    conll_files = conll_file if isinstance(conll_file, (list, tuple)) else [conll_file]
+    for path in conll_files:
+        for sentence in pyconll.load_from_file(path):
+            yield sentence
+
+
 def extract_activations(model, dataloader, layer_num):
     """
     Extract activations for the entire dataset.
@@ -73,10 +80,9 @@ def concept_label_stats(
     exclude_other_values=False,
     drop_conflicts=False,
 ):
-    data = pyconll.load_from_file(conll_file)
     exclude_values = set(exclude_values or [])
     stats = {"only_target": 0, "only_excluded": 0, "both": 0, "neither": 0}
-    for sentence in data:
+    for sentence in _iter_conll_sentences(conll_file):
         has_target = False
         has_excluded = False
         for token in sentence:
@@ -107,9 +113,8 @@ def concept_label_stats(
     return stats
 
 def get_features_and_values(conll_file):
-    data = pyconll.load_from_file(conll_file)
     features = {}
-    for sentence in data:
+    for sentence in _iter_conll_sentences(conll_file):
         for token in sentence:
             for feat, values in token.feats.items():
                 if feat not in features:

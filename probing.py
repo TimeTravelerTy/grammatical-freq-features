@@ -1,5 +1,6 @@
 import argparse
 import glob
+import json
 import logging
 import os
 from functools import partial
@@ -18,34 +19,75 @@ from src.probing.data import ProbingDataset, balance_dataset
 # Constants
 TRACER_KWARGS = {'scan': False, 'validate': False}
 LOG_DIR = 'logs'
-UD_BASE_FOLDER = "./data/universal_dependencies/"
+UD_BASE_FOLDER = "./data/UniversalDependencies"
+DEFAULT_CONCEPT_KEYS = ("Number", "Tense")
 
 # Set up logging
 os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(filename=os.path.join(LOG_DIR, 'probing.txt'), 
-                    level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    filename=os.path.join(LOG_DIR, 'probing.txt'),
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+)
+
 
 def setup_model(model_name):
     """Initialize and return the language model."""
     return LanguageModel(model_name, torch_dtype=torch.float16, device_map="auto", token=HF_TOKEN)
 
-def find_ud_file(ud_base_folder, pattern, override=None):
-    if override:
-        return override
-    matches = glob.glob(os.path.join(ud_base_folder, "**", pattern), recursive=True)
-    if not matches:
+
+def resolve_ud_base_folder(ud_base_folder):
+    if os.path.exists(ud_base_folder):
+        return ud_base_folder
+    return ud_base_folder
+
+
+def parse_ud_paths(value):
+    if not value:
         return None
-    if len(matches) > 1:
-        raise ValueError(
-            f"Found multiple matches for {pattern} under {ud_base_folder}. "
-            "Specify the exact file with --ud_train_file/--ud_test_file."
-        )
-    return matches[0]
+    paths = [path.strip() for path in value.split(",") if path.strip()]
+    return paths or None
+
+
+def find_ud_files(ud_base_folder, pattern, override=None):
+    override_paths = parse_ud_paths(override)
+    if override_paths:
+        return override_paths
+    matches = glob.glob(os.path.join(ud_base_folder, "**", pattern), recursive=True)
+    return sorted(set(matches))
+
+
+def dedupe_paths(paths):
+    seen = set()
+    deduped = []
+    for path in paths:
+        normalized = os.path.abspath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(path)
+    return deduped
+
+
+def parse_layers(layer_spec):
+    if not layer_spec:
+        return None
+    layers = set()
+    for part in layer_spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            layers.update(range(int(start), int(end) + 1))
+        else:
+            layers.add(int(part))
+    return sorted(layers)
+
 
 def prepare_datasets(
-    train_filepath,
-    test_filepath,
+    train_filepaths,
+    test_filepaths,
     concept_key,
     concept_value,
     seed,
@@ -64,11 +106,11 @@ def prepare_datasets(
         exclude_other_values=exclude_other_values,
         drop_conflicts=drop_conflicts,
     )
-    train_dataset = ProbingDataset(train_filepath, filter_criterion)
-    test_dataset = ProbingDataset(test_filepath, filter_criterion)
+    train_dataset = ProbingDataset(train_filepaths, filter_criterion)
+    test_dataset = ProbingDataset(test_filepaths, filter_criterion)
 
     train_stats = concept_label_stats(
-        train_filepath,
+        train_filepaths,
         concept_key,
         concept_value,
         pos_tags=pos_tags,
@@ -77,7 +119,7 @@ def prepare_datasets(
         drop_conflicts=drop_conflicts,
     )
     test_stats = concept_label_stats(
-        test_filepath,
+        test_filepaths,
         concept_key,
         concept_value,
         pos_tags=pos_tags,
@@ -122,10 +164,16 @@ def prepare_datasets(
 
     return train_dataset, test_dataset
 
+
 def train_and_evaluate_probe(train_activations, train_labels, test_activations, test_labels, seed):
     """Train a logistic regression probe and evaluate its performance."""
     print("Training logistic regression model...")
-    classifier = LogisticRegression(random_state=seed, max_iter=1000, class_weight="balanced", solver="newton-cholesky")
+    classifier = LogisticRegression(
+        random_state=seed,
+        max_iter=1000,
+        class_weight="balanced",
+        solver="newton-cholesky",
+    )
     classifier.fit(train_activations, train_labels)
 
     train_accuracy = classifier.score(train_activations, train_labels)
@@ -134,42 +182,48 @@ def train_and_evaluate_probe(train_activations, train_labels, test_activations, 
     print(f"Train Accuracy: {train_accuracy:.2f}")
     print(f"Test Accuracy: {test_accuracy:.2f}")
 
-    return classifier
+    return classifier, train_accuracy, test_accuracy
 
-def process_dataset(args, train_filepath, test_filepath):
+
+def process_dataset(args, train_filepaths, test_filepaths):
     """Process a single dataset for probing."""
     print("\nProcessing dataset")
     logging.info("Processing dataset")
 
     model = setup_model(args.model_name)
 
-    if not train_filepath or not test_filepath:
+    if not train_filepaths or not test_filepaths:
         print("Skipping dataset: Missing train or test file")
         logging.warning("Skipping dataset: Missing train or test file")
         return
 
-    features = get_features_and_values(train_filepath)
-    if args.concept_keys:
+    features = get_features_and_values(train_filepaths)
+    keys = None
+    if args.concept_keys and args.concept_keys.strip().lower() != "all":
         keys = {k.strip() for k in args.concept_keys.split(",") if k.strip()}
+    if keys is not None:
         features = {k: v for k, v in features.items() if k in keys}
 
     output_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
+    os.makedirs(output_dir, exist_ok=True)
+
     for concept_key, values in features.items():
-        for concept_value in values:
+        for concept_value in sorted(values):
             print(f"\nProcessing {concept_key}: {concept_value}")
             logging.info(f"Processing {concept_key}: {concept_value}")
 
             model_filename = f"{concept_key}_{concept_value}.joblib"
             model_path = os.path.join(output_dir, model_filename)
-            
-            if os.path.exists(model_path):
-                print(f"Probe already exists. Skipping.")
+            sweep_path = os.path.join(output_dir, f"{concept_key}_{concept_value}_layer_sweep.json")
+
+            if os.path.exists(model_path) and not args.overwrite:
+                print("Probe already exists. Skipping.")
                 logging.info(f"Probe already exists for {concept_key}: {concept_value}. Skipping.")
                 continue
 
             train_dataset, test_dataset = prepare_datasets(
-                train_filepath,
-                test_filepath,
+                train_filepaths,
+                test_filepaths,
                 concept_key,
                 concept_value,
                 args.seed,
@@ -180,23 +234,71 @@ def process_dataset(args, train_filepath, test_filepath):
             )
 
             if train_dataset is None or len(train_dataset) < 128 or test_dataset is None:
-                print(f"Not enough samples. Skipping.")
+                print("Not enough samples. Skipping.")
                 logging.warning(f"Skipping {concept_key}: {concept_value}: Not enough samples")
                 continue
 
             train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
             test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-            print("Extracting activations...")
-            train_activations, train_labels = extract_activations(model, train_dataloader, args.layer_num)
-            test_activations, test_labels = extract_activations(model, test_dataloader, args.layer_num)
+            layer_results = []
+            best_layer = None
+            best_train_acc = None
+            best_test_acc = -1.0
+            best_classifier = None
 
-            classifier = train_and_evaluate_probe(train_activations, train_labels, test_activations, test_labels, args.seed)
+            for layer in args.layers:
+                print(f"Extracting activations for layer {layer}...")
+                train_activations, train_labels = extract_activations(model, train_dataloader, layer)
+                test_activations, test_labels = extract_activations(model, test_dataloader, layer)
 
-            os.makedirs(output_dir, exist_ok=True)
-            joblib.dump(classifier, model_path)
-            print(f"Saved trained model to {model_path}")
-            logging.info(f"Saved trained model to {model_path}")
+                classifier, train_acc, test_acc = train_and_evaluate_probe(
+                    train_activations,
+                    train_labels,
+                    test_activations,
+                    test_labels,
+                    args.seed,
+                )
+
+                layer_results.append(
+                    {
+                        "layer": layer,
+                        "train_accuracy": train_acc,
+                        "test_accuracy": test_acc,
+                    }
+                )
+
+                if args.save_all_layers:
+                    layer_model_path = os.path.join(output_dir, f"{concept_key}_{concept_value}_layer{layer}.joblib")
+                    joblib.dump(classifier, layer_model_path)
+
+                if test_acc > best_test_acc:
+                    best_layer = layer
+                    best_train_acc = train_acc
+                    best_test_acc = test_acc
+                    best_classifier = classifier
+
+            if best_classifier is None:
+                print("No probe trained for this concept. Skipping save.")
+                logging.warning(f"No probe trained for {concept_key}: {concept_value}.")
+                continue
+
+            joblib.dump(best_classifier, model_path)
+            print(f"Saved best probe (layer {best_layer}) to {model_path}")
+            logging.info(f"Saved best probe for {concept_key}: {concept_value} (layer {best_layer}) to {model_path}")
+
+            sweep_summary = {
+                "concept_key": concept_key,
+                "concept_value": concept_value,
+                "layers": layer_results,
+                "best_layer": best_layer,
+                "best_train_accuracy": best_train_acc,
+                "best_test_accuracy": best_test_acc,
+            }
+            with open(sweep_path, "w", encoding="utf-8") as f:
+                json.dump(sweep_summary, f, indent=2)
+            print(f"Saved layer sweep results to {sweep_path}")
+
 
 def main(args):
     if args.pos_tags:
@@ -208,35 +310,57 @@ def main(args):
     if args.drop_conflicts:
         args.drop_conflicts = True
 
-    try:
-        train_filepath = find_ud_file(args.ud_base_folder, "*-ud-train.conllu", args.ud_train_file)
-        test_filepath = find_ud_file(args.ud_base_folder, "*-ud-test.conllu", args.ud_test_file)
-    except ValueError as exc:
-        print(f"Error: {exc}")
-        logging.error(str(exc))
+    args.ud_base_folder = resolve_ud_base_folder(args.ud_base_folder)
+
+    layers = parse_layers(args.layers)
+    if layers is None:
+        if args.layer_num is not None:
+            layers = [args.layer_num]
+        else:
+            layers = list(range(0, 9))
+    args.layers = layers
+
+    train_filepaths = find_ud_files(args.ud_base_folder, "*-ud-train.conllu", args.ud_train_file)
+    if args.include_ud_dev:
+        dev_paths = find_ud_files(args.ud_base_folder, "*-ud-dev.conllu")
+        train_filepaths = dedupe_paths((train_filepaths or []) + dev_paths)
+
+    test_filepaths = find_ud_files(args.ud_base_folder, "*-ud-test.conllu", args.ud_test_file)
+
+    if not train_filepaths or not test_filepaths:
+        print(
+            "Error: Missing UD train/test files. "
+            "Provide --ud_train_file/--ud_test_file or a base folder with UD data."
+        )
+        logging.error("Missing UD train/test files.")
         return
 
-    if not train_filepath or not test_filepath:
-        print("Error: Missing UD train/test file. Provide --ud_train_file/--ud_test_file or a base folder.")
-        logging.error("Missing UD train/test file.")
-        return
+    process_dataset(args, train_filepaths, test_filepaths)
 
-    process_dataset(args, train_filepath, test_filepath)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Probing script for language models")
     parser.add_argument("--model_name", type=str, required=True, help="Name of the language model to use")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for data loading")
-    parser.add_argument("--layer_num", type=int, default=16, help="Layer number to extract activations from")
+    parser.add_argument("--layer_num", type=int, default=None, help="Single layer to extract activations from")
+    parser.add_argument("--layers", type=str, default=None, help="Layer list/range (e.g., 0-8 or 0,2,4)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--concept_keys", type=str, default=None, help="Comma-separated concept keys to probe (e.g., Number,Tense)")
+    parser.add_argument(
+        "--concept_keys",
+        type=str,
+        default=",".join(DEFAULT_CONCEPT_KEYS),
+        help="Comma-separated concept keys to probe (e.g., Number,Tense). Use 'all' for every concept.",
+    )
     parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")
     parser.add_argument("--exclude_values", type=str, default=None, help="Comma-separated concept values to exclude (e.g., Plur)")
     parser.add_argument("--exclude_other_values", action="store_true", help="Exclude sentences that contain any other values of the concept")
     parser.add_argument("--drop_conflicts", action="store_true", help="Drop sentences that contain both target and excluded values")
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
-    parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
-    parser.add_argument("--ud_test_file", type=str, default=None, help="Override UD test .conllu path")
+    parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu paths (comma-separated)")
+    parser.add_argument("--ud_test_file", type=str, default=None, help="Override UD test .conllu paths (comma-separated)")
+    parser.add_argument("--include_ud_dev", action="store_true", help="Include UD dev files in the training set")
+    parser.add_argument("--save_all_layers", action="store_true", help="Save probes for every layer in addition to the best")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing probes")
     args = parser.parse_args()
 
     main(args)

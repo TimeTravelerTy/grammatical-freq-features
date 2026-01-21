@@ -22,7 +22,7 @@ from src.utils import get_available_concepts
 # Constants
 TRACER_KWARGS = {'scan': False, 'validate': False}
 LOG_DIR = 'logs'
-UD_BASE_FOLDER = "./data/universal_dependencies/"
+UD_BASE_FOLDER = "./data/UniversalDependencies"
 AYA_AE_PATH = ""
 
 # Set up logging
@@ -40,18 +40,39 @@ def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
 
-def find_ud_train_file(ud_base_folder, override=None):
-    if override:
-        return override
-    matches = glob.glob(os.path.join(ud_base_folder, "**", "*-ud-train.conllu"), recursive=True)
-    if not matches:
+
+
+def resolve_ud_base_folder(ud_base_folder):
+    if os.path.exists(ud_base_folder):
+        return ud_base_folder
+    return ud_base_folder
+
+
+def parse_ud_paths(value):
+    if not value:
         return None
-    if len(matches) > 1:
-        raise ValueError(
-            f"Found multiple training files under {ud_base_folder}. "
-            "Specify the exact file with --ud_train_file."
-        )
-    return matches[0]
+    paths = [path.strip() for path in value.split(",") if path.strip()]
+    return paths or None
+
+
+def find_ud_files(ud_base_folder, pattern, override=None):
+    override_paths = parse_ud_paths(override)
+    if override_paths:
+        return override_paths
+    matches = glob.glob(os.path.join(ud_base_folder, "**", pattern), recursive=True)
+    return sorted(set(matches))
+
+
+def dedupe_paths(paths):
+    seen = set()
+    deduped = []
+    for path in paths:
+        normalized = os.path.abspath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(path)
+    return deduped
 
 def resolve_submodule_device(model, submodule, fallback=None):
     for param in submodule.parameters():
@@ -147,16 +168,85 @@ def load_progress(output_dir, concept_key, concept_value):
         return outputs
     return {}
 
+
+
 def process_concept(args, concept_key, concept_value, model, submodule, autoencoder, probe_dir, output_dir, verbose=True):
     """Process a single concept."""
     if verbose:
         print(f"Processing concept: {concept_key}:{concept_value}")
-    
+
     outputs = load_progress(output_dir, concept_key, concept_value)
     if outputs.get("top_1_percent") and outputs.get("bottom_1_percent"):
         if verbose:
             print("Skipping concept - already processed.")
         return outputs
+
+    ud_train_filepaths = find_ud_files(args.ud_base_folder, "*-ud-train.conllu", args.ud_train_file)
+    if args.include_ud_dev:
+        dev_paths = find_ud_files(args.ud_base_folder, "*-ud-dev.conllu")
+        ud_train_filepaths = dedupe_paths((ud_train_filepaths or []) + dev_paths)
+
+    if not ud_train_filepaths:
+        if verbose:
+            print("Training file not found. Skipping.")
+        return outputs
+
+    # Check if the concept exists for this dataset
+    features = get_features_and_values(ud_train_filepaths)
+    if concept_key not in features or concept_value not in features[concept_key]:
+        if verbose:
+            print(f"Concept {concept_key}:{concept_value} not found in the data. Skipping.")
+        return outputs
+
+    # Load and convert probe to PyTorch
+    probe_file = os.path.join(probe_dir, f"{concept_key}_{concept_value}.joblib")
+    if not os.path.exists(probe_file):
+        if verbose:
+            print(f"Probe file not found for {concept_key}_{concept_value}. Skipping.")
+        return outputs
+
+    probe = joblib.load(probe_file)
+    torch_probe = convert_probe_to_pytorch(probe, device=resolve_device(model, submodule, autoencoder))
+    for p in torch_probe.parameters():
+        p.requires_grad_(False)
+    try:
+        print("Probe param device:", next(torch_probe.parameters()).device)
+    except Exception:
+        print("Probe param device:", None)
+
+    # Prepare dataset
+    train_dataset = prepare_dataset(
+        ud_train_filepaths,
+        concept_key,
+        concept_value,
+        args.seed,
+        pos_tags=args.pos_tags,
+        exclude_values=args.exclude_values,
+        exclude_other_values=args.exclude_other_values,
+        drop_conflicts=args.drop_conflicts,
+    )
+    if train_dataset is None or len(train_dataset) < 128:
+        if verbose:
+            print(f"Not enough samples in training set for {concept_key}_{concept_value}. Skipping.")
+        return outputs
+
+    # Perform attribution patching
+    effects = attribution_patching_loop(train_dataset, model, torch_probe, submodule, autoencoder)
+
+    # Select top and bottom features
+    top_effects, bottom_effects = select_top_bottom_features(effects[submodule])
+
+    outputs = {
+        "top_1_percent": top_effects,
+        "bottom_1_percent": bottom_effects
+    }
+
+    output_file = os.path.join(output_dir, f"{concept_key}_{concept_value}.json")
+    dict_to_json(outputs, output_file)
+    if verbose:
+        print(f"Saved progress to {output_file}")
+
+    return outputs
 
     try:
         ud_train_filepath = find_ud_train_file(args.ud_base_folder, args.ud_train_file)
@@ -227,8 +317,10 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
 
     return outputs
 
+
+
 def prepare_dataset(
-    ud_train_filepath,
+    ud_train_filepaths,
     concept_key,
     concept_value,
     seed,
@@ -247,7 +339,7 @@ def prepare_dataset(
         exclude_other_values=exclude_other_values,
         drop_conflicts=drop_conflicts,
     )
-    train_dataset = ProbingDataset(ud_train_filepath, filter_criterion)
+    train_dataset = ProbingDataset(ud_train_filepaths, filter_criterion)
     return balance_dataset(train_dataset, seed)
 
 def attribution_patching_loop(dataset, model, torch_probe, submodule, autoencoder):
@@ -353,7 +445,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, required=True, help="Name of the language model")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
-    parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
+    parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu paths (comma-separated)")
+    parser.add_argument("--include_ud_dev", action="store_true", help="Include UD dev files in the training set")
     parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")
     parser.add_argument("--exclude_values", type=str, default=None, help="Comma-separated concept values to exclude (e.g., Plur)")
     parser.add_argument("--exclude_other_values", action="store_true", help="Exclude sentences that contain any other values of the concept")
@@ -362,6 +455,7 @@ if __name__ == "__main__":
     parser.add_argument("--load_with_transformers", action="store_true", help="Load model with transformers before wrapping with nnsight")
     args = parser.parse_args()
 
+    args.ud_base_folder = resolve_ud_base_folder(args.ud_base_folder)
     if args.pos_tags:
         args.pos_tags = [tag.strip() for tag in args.pos_tags.split(",") if tag.strip()]
     if args.exclude_values:

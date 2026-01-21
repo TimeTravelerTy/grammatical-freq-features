@@ -73,7 +73,6 @@ docs/_build/
 
 outputs/
 logs/
-data/en_ewt-ud/
 
 # PyBuilder
 .pybuilder/
@@ -92,7 +91,7 @@ ipython_config.py
 # .python-version
 
 # Local large assets
-UD_English_EWT/
+UniversalDependencies/
 autoencoders/
 data/freqBLiMP/
 data/concepts.json
