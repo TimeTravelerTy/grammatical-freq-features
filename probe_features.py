@@ -1,6 +1,7 @@
 import argparse
 import glob
 import json
+import re
 import logging
 import os
 from collections import defaultdict
@@ -15,7 +16,7 @@ from tqdm import tqdm
 from nnsight import LanguageModel
 
 from src.config import HF_TOKEN
-from sparsify import Sae
+from sae_lens import SAE
 from src.utils import setup_model, setup_autoencoder, dict_to_json
 from src.probing.attribution import attribution_patching
 from src.probing.data import MinimalPairDataset, ProbingDataset, balance_dataset
@@ -170,6 +171,15 @@ def _has_meta_params(module):
     return False
 
 
+def _extract_layer_index(hook_name):
+    if not hook_name:
+        return None
+    match = re.search(r"(?:layers|blocks)\\.(\\d+)", hook_name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16, load_with_transformers=False):
     """Set up the language model and autoencoder."""
     model = None
@@ -197,19 +207,31 @@ def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch
     if _has_meta_params(model.model):
         raise RuntimeError("Model parameters are still on meta device after loading; check device_map/model loading.")
     use_llama31_sae = "llama-3.1-8b" in model_name.lower()
-    layer_index = 2 if use_llama31_sae else 16
-    submodule = model.model.layers[layer_index]
-    ae_device = resolve_submodule_device(model, submodule, fallback=device_map)
     if use_llama31_sae:
-        autoencoder = Sae.load_from_hub(
-            "EleutherAI/sae-llama-3.1-8b-32x",
-            hookpoint="layers.2.mlp",
-        ).to(ae_device)
-    elif "llama" in model_name:
-        autoencoder = setup_autoencoder(device=ae_device)
+        autoencoder = SAE.from_pretrained(
+            repo_id="OpenMOSS-Team/Llama3_1-8B-Base-LXR-32x",
+            sae_id="L2R-32x",
+            device="cuda" if torch.cuda.is_available() and device_map != "cpu" else "cpu",
+        )
+        hook_name = getattr(getattr(autoencoder, "cfg", None), "hook_name", None)
+        layer_index = _extract_layer_index(hook_name) or 2
+        submodule = model.model.layers[layer_index]
+        ae_device = resolve_submodule_device(model, submodule, fallback=device_map)
+        if hasattr(autoencoder, "to"):
+            autoencoder = autoencoder.to(ae_device)
     else:
-        autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH, device=ae_device)
-    print(f"Autoencoder dictionary size: {autoencoder.dict_size}")
+        submodule = model.model.layers[16]
+        ae_device = resolve_submodule_device(model, submodule, fallback=device_map)
+        if "llama" in model_name:
+            autoencoder = setup_autoencoder(device=ae_device)
+        else:
+            autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH, device=ae_device)
+
+    dict_size = getattr(autoencoder, "dict_size", None)
+    if dict_size is None:
+        dict_size = getattr(getattr(autoencoder, "cfg", None), "d_sae", None)
+    if dict_size is not None:
+        print(f"Autoencoder dictionary size: {dict_size}")
     return model, submodule, autoencoder
 
 def load_progress(output_dir, concept_key, concept_value):
