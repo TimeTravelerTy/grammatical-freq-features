@@ -3,6 +3,7 @@ import glob
 import json
 import logging
 import os
+from collections import defaultdict
 from functools import partial
 
 import joblib
@@ -16,8 +17,9 @@ from nnsight import LanguageModel
 from src.config import HF_TOKEN
 from src.utils import setup_model, setup_autoencoder, dict_to_json
 from src.probing.attribution import attribution_patching
-from src.probing.data import ProbingDataset, balance_dataset
-from src.probing.utils import get_features_and_values, concept_filter, convert_probe_to_pytorch
+from src.probing.data import MinimalPairDataset, ProbingDataset, balance_dataset
+from src.probing.lingualens import DEFAULT_FEATURES, LinguaLensDataset, load_lingualens_pairs
+from src.probing.utils import get_features_and_values, concept_filter, convert_probe_to_pytorch, logprob_sum_from_logits
 from src.utils import get_available_concepts
 # Constants
 TRACER_KWARGS = {'scan': False, 'validate': False}
@@ -39,6 +41,50 @@ import gc
 def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
+
+
+def logprob_diff_metric(
+    model,
+    submodule,
+    probe,
+    input_ids=None,
+    clean_positions=None,
+    patch_logprob=None,
+    **_,
+):
+    if input_ids is None:
+        raise ValueError("input_ids required for logprob_diff_metric")
+    logits = model.output[0]
+    clean_logprob = logprob_sum_from_logits(logits, input_ids, clean_positions)
+    if patch_logprob is None:
+        return clean_logprob
+    if isinstance(patch_logprob, torch.Tensor):
+        patch_logprob = patch_logprob.to(clean_logprob.device)
+        if patch_logprob.dim() == 0:
+            patch_logprob = patch_logprob.unsqueeze(0)
+        if patch_logprob.numel() == 1 and clean_logprob.numel() > 1:
+            patch_logprob = patch_logprob.expand_as(clean_logprob)
+    return clean_logprob - patch_logprob
+
+
+def word_indices_to_token_positions(encoding, word_indices):
+    if not word_indices:
+        return []
+    word_ids = None
+    if hasattr(encoding, "word_ids"):
+        try:
+            word_ids = encoding.word_ids()
+        except TypeError:
+            try:
+                word_ids = encoding.word_ids(batch_index=0)
+            except Exception:
+                word_ids = None
+        except Exception:
+            word_ids = None
+    if word_ids is None:
+        return []
+    word_index_set = set(word_indices)
+    return [i for i, wid in enumerate(word_ids) if wid in word_index_set]
 
 
 
@@ -248,73 +294,34 @@ def process_concept(args, concept_key, concept_value, model, submodule, autoenco
 
     return outputs
 
-    try:
-        ud_train_filepath = find_ud_train_file(args.ud_base_folder, args.ud_train_file)
-    except ValueError as exc:
-        if verbose:
-            print(str(exc))
-        return outputs
 
-    if not ud_train_filepath:
-        if verbose:
-            print("Training file not found. Skipping.")
-        return outputs
+def process_lingualens_feature(args, feature, model, submodule, autoencoder, output_dir, pairs=None, verbose=True):
+    if verbose:
+        print(f"Processing LinguaLens feature: {feature}")
 
-    # Check if the concept exists for this dataset
-    features = get_features_and_values(ud_train_filepath)
-    if concept_key not in features or concept_value not in features[concept_key]:
+    dataset = prepare_lingualens_dataset(args, feature, pairs=pairs)
+    if len(dataset) < 16:
         if verbose:
-            print(f"Concept {concept_key}:{concept_value} not found in the data. Skipping.")
-        return outputs
+            print(f"Not enough pairs for {feature}. Skipping.")
+        return None
 
-    # Load and convert probe to PyTorch
-    probe_file = os.path.join(probe_dir, f"{concept_key}_{concept_value}.joblib")
-    if not os.path.exists(probe_file):
-        if verbose:
-            print(f"Probe file not found for {concept_key}_{concept_value}. Skipping.")
-        return outputs
-        
-    probe = joblib.load(probe_file)
-    torch_probe = convert_probe_to_pytorch(probe, device=resolve_device(model, submodule, autoencoder))
-    for p in torch_probe.parameters():
-        p.requires_grad_(False)
-    try:
-        print("Probe param device:", next(torch_probe.parameters()).device)
-    except Exception:
-        print("Probe param device:", None)
-
-    # Prepare dataset
-    train_dataset = prepare_dataset(
-        ud_train_filepath,
-        concept_key,
-        concept_value,
-        args.seed,
-        pos_tags=args.pos_tags,
-        exclude_values=args.exclude_values,
-        exclude_other_values=args.exclude_other_values,
-        drop_conflicts=args.drop_conflicts,
+    effects = attribution_patching_loop_lingualens(
+        dataset,
+        model,
+        submodule,
+        autoencoder,
+        max_examples=args.lingualens_max_examples,
     )
-    if train_dataset is None or len(train_dataset) < 128:
-        if verbose:
-            print(f"Not enough samples in training set for {concept_key}_{concept_value}. Skipping.")
-        return outputs
-
-    # Perform attribution patching
-    effects = attribution_patching_loop(train_dataset, model, torch_probe, submodule, autoencoder)
-
-    # Select top and bottom features
     top_effects, bottom_effects = select_top_bottom_features(effects[submodule])
-
     outputs = {
+        "feature": feature,
         "top_1_percent": top_effects,
-        "bottom_1_percent": bottom_effects
+        "bottom_1_percent": bottom_effects,
     }
-
-    output_file = os.path.join(output_dir, f"{concept_key}_{concept_value}.json")
+    output_file = os.path.join(output_dir, f"lingualens_{feature}.json")
     dict_to_json(outputs, output_file)
     if verbose:
         print(f"Saved progress to {output_file}")
-
     return outputs
 
 
@@ -330,17 +337,43 @@ def prepare_dataset(
     drop_conflicts=False,
 ):
     """Prepare and balance the dataset."""
-    filter_criterion = partial(
-        concept_filter,
-        concept_key=concept_key,
-        concept_value=concept_value,
-        pos_tags=pos_tags,
-        exclude_values=exclude_values,
-        exclude_other_values=exclude_other_values,
-        drop_conflicts=drop_conflicts,
-    )
-    train_dataset = ProbingDataset(ud_train_filepaths, filter_criterion)
+    use_minimal_pairs = concept_key in {"Number", "Tense"}
+    if use_minimal_pairs:
+        train_dataset = MinimalPairDataset(
+            ud_train_filepaths,
+            concept_key,
+            concept_value,
+            pos_tags=pos_tags,
+            exclude_values=exclude_values,
+            exclude_other_values=exclude_other_values,
+            drop_conflicts=drop_conflicts,
+        )
+    else:
+        filter_criterion = partial(
+            concept_filter,
+            concept_key=concept_key,
+            concept_value=concept_value,
+            pos_tags=pos_tags,
+            exclude_values=exclude_values,
+            exclude_other_values=exclude_other_values,
+            drop_conflicts=drop_conflicts,
+        )
+        train_dataset = ProbingDataset(ud_train_filepaths, filter_criterion)
     return balance_dataset(train_dataset, seed)
+
+
+def prepare_lingualens_dataset(args, feature, pairs=None):
+    if pairs is not None:
+        feature_pairs = [p for p in pairs if p["feature"] == feature]
+        return LinguaLensDataset(pairs=feature_pairs)
+    return LinguaLensDataset(
+        split=args.lingualens_split,
+        language="English",
+        categories=("syntax", "morphology"),
+        features=[feature],
+        max_samples=args.lingualens_max_samples,
+        seed=args.seed,
+    )
 
 def attribution_patching_loop(dataset, model, torch_probe, submodule, autoencoder):
     """Perform attribution patching on the dataset."""
@@ -351,18 +384,78 @@ def attribution_patching_loop(dataset, model, torch_probe, submodule, autoencode
             break
         if i > 0 and i % 8 == 0:
             print(f"Attribution patching: processed {i} examples")
+        clean_text = example["sentence"][0]
+        patch_text = None
+        if "patch_sentence" in example and example["patch_sentence"]:
+            patch_text = example["patch_sentence"][0]
         tokens = model.tokenizer(
-            example["sentence"][0],
+            clean_text,
             return_tensors="pt",
             padding=False,
             return_attention_mask=True,
         )
+        patch_tokens = None
+        if patch_text:
+            patch_tokens = model.tokenizer(
+                patch_text,
+                return_tensors="pt",
+                padding=False,
+                return_attention_mask=True,
+            )
         e, _, _, _ = attribution_patching(
             tokens,
             model,
             torch_probe,
             [submodule],
             {submodule: autoencoder},
+            patch_prefix=patch_tokens,
+        )
+        if submodule not in effects:
+            effects[submodule] = e[submodule].sum(dim=0)
+        else:
+            effects[submodule] += e[submodule].sum(dim=0)
+    return effects
+
+
+def attribution_patching_loop_lingualens(dataset, model, submodule, autoencoder, max_examples=128):
+    """Perform attribution patching on LinguaLens minimal pairs."""
+    effects = {}
+    for i, example in enumerate(tqdm(dataset, desc="Attribution patching (LinguaLens)")):
+        if i >= max_examples:
+            break
+        clean_words = example.get("clean_words") or example["sentence"].split()
+        patch_words = example.get("patch_words") or example["patch_sentence"].split()
+        clean_tokens = model.tokenizer(
+            clean_words,
+            return_tensors="pt",
+            padding=False,
+            is_split_into_words=True,
+            return_attention_mask=True,
+        )
+        patch_tokens = model.tokenizer(
+            patch_words,
+            return_tensors="pt",
+            padding=False,
+            is_split_into_words=True,
+            return_attention_mask=True,
+        )
+        clean_positions = word_indices_to_token_positions(clean_tokens, example.get("clean_word_indices", []))
+        patch_positions = word_indices_to_token_positions(patch_tokens, example.get("patch_word_indices", []))
+        if not clean_positions or not patch_positions:
+            continue
+
+        e, _, _, _ = attribution_patching(
+            clean_tokens,
+            model,
+            probe=None,
+            submodules=[submodule],
+            dictionaries={submodule: autoencoder},
+            patch_prefix=patch_tokens,
+            metric_fn=logprob_diff_metric,
+            metric_kwargs={
+                "clean_positions": clean_positions,
+                "patch_positions": patch_positions,
+            },
         )
         if submodule not in effects:
             effects[submodule] = e[submodule].sum(dim=0)
@@ -408,8 +501,51 @@ def feature_selection(args):
     print("Submodule param device:", _dev(submodule))
     print("AE param device:", _dev(autoencoder))
     
-    probe_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
     output_dir = f"outputs/probing/features/{'llama' if 'llama' in args.model_name else 'aya'}"
+    if args.lingualens:
+        output_dir = os.path.join(output_dir, "lingualens")
+        os.makedirs(output_dir, exist_ok=True)
+        features = args.lingualens_features or list(DEFAULT_FEATURES)
+        pairs = load_lingualens_pairs(
+            split=args.lingualens_split,
+            language="English",
+            categories=("syntax", "morphology"),
+            features=features,
+            max_samples=args.lingualens_max_samples,
+            seed=args.seed,
+        )
+        grouped = defaultdict(list)
+        for pair in pairs:
+            grouped[pair["feature"]].append(pair)
+        for feature in features:
+            try:
+                process_lingualens_feature(
+                    args,
+                    feature,
+                    model,
+                    submodule,
+                    autoencoder,
+                    output_dir,
+                    pairs=grouped.get(feature, []),
+                )
+            except torch.cuda.OutOfMemoryError:
+                print(f"CUDA out of memory error for feature {feature}")
+                cleanup_memory()
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.empty_cache()
+                print("Cleaned up memory and continuing with next feature...")
+                continue
+            except Exception as e:
+                print(f"Error processing feature {feature}: {str(e)}")
+                traceback.print_exc()
+                print("Continuing with next feature...")
+                continue
+            finally:
+                cleanup_memory()
+        return
+
+    probe_dir = f"outputs/probing/probes/{'llama' if 'llama' in args.model_name else 'aya'}"
     print(f"Probe directory: {probe_dir}")
     print(f"Output directory: {output_dir}")
 
@@ -419,7 +555,6 @@ def feature_selection(args):
         concepts = get_available_concepts(probe_dir)
 
     for concept_key, concept_value in tqdm(concepts, desc="Processing concepts"):
-        #process_concept(args, concept_key, concept_value, model, submodule, autoencoder, probe_dir, output_dir)
         try:
             process_concept(args, concept_key, concept_value, model, submodule, autoencoder, probe_dir, output_dir)
         except torch.cuda.OutOfMemoryError:
@@ -453,6 +588,16 @@ if __name__ == "__main__":
     parser.add_argument("--drop_conflicts", action="store_true", help="Drop sentences that contain both target and excluded values")
     parser.add_argument("--device_map", type=str, default="cuda", help="Device map for model/SAE (e.g., cuda, cpu, auto)")
     parser.add_argument("--load_with_transformers", action="store_true", help="Load model with transformers before wrapping with nnsight")
+    parser.add_argument("--lingualens", action="store_true", help="Use LinguaLens minimal pairs instead of UD probes")
+    parser.add_argument(
+        "--lingualens_features",
+        type=str,
+        default=",".join(DEFAULT_FEATURES),
+        help="Comma-separated LinguaLens features to use",
+    )
+    parser.add_argument("--lingualens_split", type=str, default="train", help="LinguaLens split to use")
+    parser.add_argument("--lingualens_max_samples", type=int, default=None, help="Optional cap on LinguaLens pairs to load")
+    parser.add_argument("--lingualens_max_examples", type=int, default=128, help="Max LinguaLens pairs per feature")
     args = parser.parse_args()
 
     args.ud_base_folder = resolve_ud_base_folder(args.ud_base_folder)
@@ -464,5 +609,7 @@ if __name__ == "__main__":
         args.exclude_other_values = True
     if args.drop_conflicts:
         args.drop_conflicts = True
+    if args.lingualens_features:
+        args.lingualens_features = [feat.strip() for feat in args.lingualens_features.split(",") if feat.strip()]
 
     feature_selection(args)

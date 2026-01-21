@@ -8,6 +8,34 @@ import os
 
 TRACER_KWARGS = {'scan': False, 'validate': False}
 
+NOUN_POS = {"NOUN", "PROPN"}
+VERB_POS = {"VERB", "AUX"}
+NUMBER_SUBTYPES = {
+    "SingNoun": {"number": "Sing", "pos_tags": NOUN_POS},
+    "PlurNoun": {"number": "Plur", "pos_tags": NOUN_POS},
+    "SingVerb": {"number": "Sing", "pos_tags": VERB_POS},
+    "PlurVerb": {"number": "Plur", "pos_tags": VERB_POS},
+}
+
+
+def _normalize_feat_values(values):
+    if not values:
+        return set()
+    if isinstance(values, str):
+        return {values}
+    return set(values)
+
+
+def resolve_concept_spec(concept_key, concept_value, pos_tags=None, exclude_values=None):
+    if concept_key == "Number":
+        exclude_values = set(exclude_values or [])
+        exclude_values.add("Ptan")
+        if concept_value in NUMBER_SUBTYPES:
+            spec = NUMBER_SUBTYPES[concept_value]
+            pos_tags = list(spec["pos_tags"])
+            concept_value = spec["number"]
+        return concept_key, concept_value, pos_tags, list(exclude_values)
+    return concept_key, concept_value, pos_tags, exclude_values
 
 def _iter_conll_sentences(conll_file):
     conll_files = conll_file if isinstance(conll_file, (list, tuple)) else [conll_file]
@@ -51,6 +79,12 @@ def concept_filter(
     exclude_other_values=False,
     drop_conflicts=False,
 ):
+    concept_key, concept_value, pos_tags, exclude_values = resolve_concept_spec(
+        concept_key,
+        concept_value,
+        pos_tags=pos_tags,
+        exclude_values=exclude_values,
+    )
     exclude_values = set(exclude_values or [])
     has_target = False
     has_excluded = False
@@ -59,7 +93,7 @@ def concept_filter(
             continue
         if concept_key not in token.feats:
             continue
-        values = token.feats.get(concept_key, set())
+        values = _normalize_feat_values(token.feats.get(concept_key))
         if concept_value in values:
             has_target = True
         if exclude_values and values.intersection(exclude_values):
@@ -80,6 +114,12 @@ def concept_label_stats(
     exclude_other_values=False,
     drop_conflicts=False,
 ):
+    concept_key, concept_value, pos_tags, exclude_values = resolve_concept_spec(
+        concept_key,
+        concept_value,
+        pos_tags=pos_tags,
+        exclude_values=exclude_values,
+    )
     exclude_values = set(exclude_values or [])
     stats = {"only_target": 0, "only_excluded": 0, "both": 0, "neither": 0}
     for sentence in _iter_conll_sentences(conll_file):
@@ -90,7 +130,7 @@ def concept_label_stats(
                 continue
             if concept_key not in token.feats:
                 continue
-            values = token.feats.get(concept_key, set())
+            values = _normalize_feat_values(token.feats.get(concept_key))
             if concept_value in values:
                 has_target = True
             if exclude_values and values.intersection(exclude_values):
@@ -117,10 +157,46 @@ def get_features_and_values(conll_file):
     for sentence in _iter_conll_sentences(conll_file):
         for token in sentence:
             for feat, values in token.feats.items():
+                if feat == "Number":
+                    continue
                 if feat not in features:
                     features[feat] = set()
-                features[feat].update(values)
+                features[feat].update(_normalize_feat_values(values))
+            if "Number" in token.feats:
+                values = _normalize_feat_values(token.feats.get("Number"))
+                if "Ptan" in values:
+                    continue
+                if token.upos in NOUN_POS:
+                    if "Sing" in values:
+                        features.setdefault("Number", set()).add("SingNoun")
+                    if "Plur" in values:
+                        features.setdefault("Number", set()).add("PlurNoun")
+                if token.upos in VERB_POS:
+                    if "Sing" in values:
+                        features.setdefault("Number", set()).add("SingVerb")
+                    if "Plur" in values:
+                        features.setdefault("Number", set()).add("PlurVerb")
     return features
+
+
+def logprob_sum_from_logits(logits, input_ids, positions):
+    if positions is None:
+        return logits.new_zeros(logits.shape[0])
+    if isinstance(positions, (list, tuple, set)):
+        positions = sorted({p for p in positions if isinstance(p, int)})
+    if not positions:
+        return logits.new_zeros(logits.shape[0])
+    seq_len = input_ids.shape[1]
+    valid = [p for p in positions if 0 < p < seq_len]
+    if not valid:
+        return logits.new_zeros(logits.shape[0])
+    pos = torch.tensor(valid, device=logits.device)
+    prev_pos = pos - 1
+    logprobs = torch.log_softmax(logits, dim=-1)
+    target_ids = input_ids[:, pos]
+    selected = logprobs[:, prev_pos, :]
+    gathered = torch.gather(selected, 2, target_ids.unsqueeze(-1)).squeeze(-1)
+    return gathered.sum(dim=1)
 
 class LogisticRegressionPyTorch(nn.Module):
     def __init__(self, n_features):
