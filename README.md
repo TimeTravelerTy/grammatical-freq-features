@@ -1,4 +1,4 @@
-# Large Language Models Share Representations of Latent Grammatical Concepts Across Typologically Diverse Languages
+# Large Language Models Share Representations of Latent Grammatical Concepts
  
 This repository contains code, data, and links to autoencoders for replicating the experiments of the paper [Large Language Models Share Representations of Latent Grammatical Concepts Across Typologically Diverse Languages](https://arxiv.org/abs/2501.06346).
 
@@ -11,11 +11,10 @@ For example, we generate counterfactual pairs that elicit singular or plural ver
 a. The parents near the cars were  
 b. The parent near the cars was
 
-This is an adaptation and translation of data from [Arora et al. (2024)](https://arxiv.org/abs/2402.12560). 
+This is an adaptation of data from [Arora et al. (2024)](https://arxiv.org/abs/2402.12560). 
 
 **Universal Dependencies.** 
-For our experiments, we selected 23 languages from Universal Dependencies 2.1 (UD; [Nivre et al., 2017](https://aclanthology.org/E17-5001/)), a multilingual treebank containing dependency-parsed sentences. 
-These correspond to the 23 languages that Aya-23 was trained on. 
+The experiments use a Universal Dependencies (UD; [Nivre et al., 2017](https://aclanthology.org/E17-5001/)) treebank containing dependency-parsed sentences.
 The dataset can be downloaded at [Universal Dependencies](https://universaldependencies.org).
 Each word in each sentence in UD is annotated with its part of speech and morphosyntactic features, as defined in the UniMorph schema.
 
@@ -54,4 +53,3 @@ If you use the dataset, please also cite:
     pages = "14638--14663"
 }
 ```
-

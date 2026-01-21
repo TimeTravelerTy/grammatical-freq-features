@@ -206,10 +206,19 @@ class Dataset:
     @classmethod
     def load_from(self, template: str) -> "Dataset":
         """Load a Dataset from a json template."""
-        template_file, template_name = template.split('/')
-        if template_name.endswith("_inverted"):
+        if "/" in template:
+            template_file, template_name = template.split("/", 1)
+        else:
+            template_file, template_name = template, None
+        if template_name and template_name.endswith("_inverted"):
             template_name = template_name[:-len("_inverted")]
         data = json.load(open(f"data/templates/{template_file}.json", "r"))
+        if template_name is None:
+            if len(data) != 1:
+                raise ValueError(
+                    f"Template {template_file} has multiple entries; specify which one to load."
+                )
+            template_name = next(iter(data.keys()))
         return Dataset(data[template_name])
     
     
@@ -351,67 +360,3 @@ class Dataset:
         random.seed(seed)
         return [self.sample_batch(tokenizer, batch_size, device, model, discard, manipulate) for _ in range(num_batches)]
 
-
-class TranslationDataset(Dataset):
-    """
-    A TranslationDataset is a dataset of minimal pairs for translation tasks.
-
-    This assumes that the source and target language templates use the same label variables.
-    """
-
-    def __init__(self, task: str, source_lang: str, target_lang: str):
-        self.source_lang = source_lang
-        self.target_lang = target_lang
-        self.source_data = Dataset.load_from(task + "/" + source_lang)
-        self.target_data = Dataset.load_from(task + "/" + target_lang)
-
-    def sample_translation_pair(self, sample_type=0) -> Pair:
-        """Sample a minimal translationpair from the dataset."""
-        # pick types (should differ)
-        base_type = self.source_data.types[sample_type]
-        src_type = self.target_data.types[sample_type]
-
-        # make templates
-        base, src = self.source_data.template[:], self.target_data.template[:]
-
-        # go token by token
-        stored_choices = {}
-        for token_i in range(len(self.source_data.template)):
-            var = self.source_data.vars_per_span[token_i]
-            if len(var) == 0: continue
-            var = var[0]
-            var_temp = '{' + var + '}'
-
-            # set label vars (different)
-            if var in self.source_data.label_vars:
-                base_choice = random.choice(self.source_data.variables[var][base_type])
-                base[token_i] = base[token_i].replace(var_temp, base_choice)
-                src[token_i] = src[token_i].replace(var_temp, base_choice)
-            # set other vars (same for both)
-            elif '.' in var:
-                head_var = var.split('.')[0]
-                if head_var not in stored_choices:
-                    stored_choices[head_var] = random.randint(0, len(self.source_data.variables[var]) - 1)
-                base[token_i] = base[token_i].replace(var_temp, self.source_data.variables[var][stored_choices[head_var]])
-                src[token_i] = src[token_i].replace(var_temp, self.target_data.variables[var][stored_choices[head_var]])
-            elif var == "name":
-                choice_index = random.randint(0, len(self.source_data.variables[var]) - 1)
-                base_choice = self.source_data.variables[var][choice_index]
-                base[token_i] = base[token_i].replace(var_temp, base_choice)
-                src[token_i] = base[token_i].replace(var_temp, base_choice)
-            else:
-                choice_index = random.randint(0, len(self.source_data.variables[var]) - 1)
-                base_choice = self.source_data.variables[var][choice_index]
-                src_choice = self.target_data.variables[var][choice_index]
-                base[token_i] = base[token_i].replace(var_temp, base_choice)
-                src[token_i] = src[token_i].replace(var_temp, src_choice)
-        
-        # get continuations
-        base_label = random.choice(self.source_data.labels[base_type])
-        src_label = random.choice(self.target_data.labels[src_type])
-        if self.source_data.result_prepend_space:
-            base_label = " " + base_label
-        if self.target_data.result_prepend_space:
-            src_label = " " + src_label
-
-        return Pair(base, src, base_type, src_type, base_label, src_label)

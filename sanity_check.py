@@ -79,7 +79,7 @@ def summarize_concepts(concepts_path):
     return {"num_features": len(concepts), "num_values": total_values}
 
 
-def load_concept_feature_indices(features_dir, concept_key, concept_value, language, k):
+def load_concept_feature_indices(features_dir, concept_key, concept_value, k):
     if not concept_key or not concept_value:
         return None
     feature_path = os.path.join(features_dir, f"{concept_key}_{concept_value}.json")
@@ -87,9 +87,15 @@ def load_concept_feature_indices(features_dir, concept_key, concept_value, langu
         raise FileNotFoundError(f"Missing feature file: {feature_path}")
     with open(feature_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    if language not in data:
-        raise KeyError(f"Language '{language}' not found in {feature_path}")
-    top_features = [feature for feature, _ in data[language]["top_1_percent"]]
+    if "top_1_percent" in data:
+        top_features = [feature for feature, _ in data["top_1_percent"]]
+    elif len(data) == 1:
+        entry = next(iter(data.values()))
+        if "top_1_percent" not in entry:
+            raise KeyError(f"Missing top_1_percent in {feature_path}")
+        top_features = [feature for feature, _ in entry["top_1_percent"]]
+    else:
+        raise KeyError(f"Unexpected feature file format: {feature_path}")
     if not top_features:
         return None
     k = min(k, len(top_features))
@@ -124,7 +130,6 @@ def main():
                         help="Log progress every N examples (0 disables).")
     parser.add_argument("--concept_key", type=str, default=None)
     parser.add_argument("--concept_value", type=str, default=None)
-    parser.add_argument("--language", type=str, default="English")
     parser.add_argument("--features_dir", type=str, default="outputs/probing/features/llama")
     parser.add_argument("--skip_model", action="store_true")
     args = parser.parse_args()
@@ -196,7 +201,7 @@ def main():
     print(f"Variants: {', '.join(variants)}")
 
     concept_features = load_concept_feature_indices(
-        args.features_dir, args.concept_key, args.concept_value, args.language, args.topk
+        args.features_dir, args.concept_key, args.concept_value, args.topk
     )
     if concept_features:
         concept_features = [idx for idx in concept_features if idx < autoencoder.dict_size]

@@ -17,13 +17,12 @@ TRACER_KWARGS = {
 def preprocess_data(
     model: LanguageModel,
     task: str,
-    language: str,
     n_samples: int = 32,
     verbose: bool = True
 ):
         
     # Load the dataset template
-    data = Dataset.load_from(task + "/" + language)
+    data = Dataset.load_from(task)
     
     # Generate counterfactual examples
     counter = 0

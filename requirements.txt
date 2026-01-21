@@ -19,7 +19,6 @@ pandas>=1.5.0
 
 # NLP utilities
 pyconll>=3.0.0
-sacrebleu>=2.3.0
 
 # Tensor/array utilities
 einops>=0.6.0

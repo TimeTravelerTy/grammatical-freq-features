@@ -18,7 +18,7 @@ from src.utils import setup_model, setup_autoencoder, dict_to_json
 from src.probing.attribution import attribution_patching
 from src.probing.data import ProbingDataset, balance_dataset
 from src.probing.utils import get_features_and_values, concept_filter, convert_probe_to_pytorch
-from src.utils import get_available_languages, get_available_concepts
+from src.utils import get_available_concepts
 # Constants
 TRACER_KWARGS = {'scan': False, 'validate': False}
 LOG_DIR = 'logs'
@@ -39,6 +39,19 @@ import gc
 def cleanup_memory():
     gc.collect()
     torch.cuda.empty_cache()
+
+def find_ud_train_file(ud_base_folder, override=None):
+    if override:
+        return override
+    matches = glob.glob(os.path.join(ud_base_folder, "**", "*-ud-train.conllu"), recursive=True)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(
+            f"Found multiple training files under {ud_base_folder}. "
+            "Specify the exact file with --ud_train_file."
+        )
+    return matches[0]
 
 def resolve_submodule_device(model, submodule, fallback=None):
     for param in submodule.parameters():
@@ -135,88 +148,82 @@ def load_progress(output_dir, concept_key, concept_value):
     return {}
 
 def process_concept(args, concept_key, concept_value, model, submodule, autoencoder, probe_dir, output_dir, verbose=True):
-    """Process a single concept across all languages."""
+    """Process a single concept."""
     if verbose:
         print(f"Processing concept: {concept_key}:{concept_value}")
     
     outputs = load_progress(output_dir, concept_key, concept_value)
-    if args.language:
-        languages = [args.language]
-    else:
-        languages = get_available_languages(args.ud_base_folder)
-
-    for language in tqdm(languages, desc=f"Processing languages for {concept_key}:{concept_value}", leave=False, disable=not verbose):
-        if language in outputs:
-            if verbose:
-                print(f"Skipping {language} - already processed.")
-            continue
-
-        if args.ud_train_file:
-            ud_train_filepath = args.ud_train_file
-        else:
-            ud_folder = f"{args.ud_base_folder}UD_{language}/"
-            ud_train_filepath = glob.glob(os.path.join(ud_folder, "*-ud-train.conllu"))
-            if not ud_train_filepath:
-                if verbose:
-                    print(f"Training file not found for {language}. Skipping.")
-                continue
-            ud_train_filepath = ud_train_filepath[0]
-
-        # Check if the concept exists for this language
-        features = get_features_and_values(ud_train_filepath)
-        if concept_key not in features or concept_value not in features[concept_key]:
-            if verbose:
-                print(f"Concept {concept_key}:{concept_value} not found in the data for {language}. Skipping.")
-            continue
-
-        # Load and convert probe to PyTorch
-        probe_file = os.path.join(probe_dir, f"{language}_{concept_key}_{concept_value}.joblib")
-        if not os.path.exists(probe_file):
-            if verbose:
-                print(f"Probe file not found for {language}_{concept_key}_{concept_value}. Skipping.")
-            continue
-        
-        probe = joblib.load(probe_file)
-        torch_probe = convert_probe_to_pytorch(probe, device=resolve_device(model, submodule, autoencoder))
-        for p in torch_probe.parameters():
-            p.requires_grad_(False)
-        try:
-            print("Probe param device:", next(torch_probe.parameters()).device)
-        except Exception:
-            print("Probe param device:", None)
-
-        # Prepare dataset
-        train_dataset = prepare_dataset(
-            ud_train_filepath,
-            concept_key,
-            concept_value,
-            args.seed,
-            pos_tags=args.pos_tags,
-            exclude_values=args.exclude_values,
-            exclude_other_values=args.exclude_other_values,
-            drop_conflicts=args.drop_conflicts,
-        )
-        if train_dataset is None or len(train_dataset) < 128:
-            if verbose:
-                print(f"Not enough samples in training set for {language}_{concept_key}_{concept_value}. Skipping.")
-            continue
-
-        # Perform attribution patching
-        effects = attribution_patching_loop(train_dataset, model, torch_probe, submodule, autoencoder)
-
-        # Select top and bottom features
-        top_effects, bottom_effects = select_top_bottom_features(effects[submodule])
-
-        outputs[language] = {
-            "top_1_percent": top_effects,
-            "bottom_1_percent": bottom_effects
-        }
-
-        # Save progress after each language
-        output_file = os.path.join(output_dir, f"{concept_key}_{concept_value}.json")
-        dict_to_json(outputs, output_file)
+    if outputs.get("top_1_percent") and outputs.get("bottom_1_percent"):
         if verbose:
-            print(f"Saved progress to {output_file}")
+            print("Skipping concept - already processed.")
+        return outputs
+
+    try:
+        ud_train_filepath = find_ud_train_file(args.ud_base_folder, args.ud_train_file)
+    except ValueError as exc:
+        if verbose:
+            print(str(exc))
+        return outputs
+
+    if not ud_train_filepath:
+        if verbose:
+            print("Training file not found. Skipping.")
+        return outputs
+
+    # Check if the concept exists for this dataset
+    features = get_features_and_values(ud_train_filepath)
+    if concept_key not in features or concept_value not in features[concept_key]:
+        if verbose:
+            print(f"Concept {concept_key}:{concept_value} not found in the data. Skipping.")
+        return outputs
+
+    # Load and convert probe to PyTorch
+    probe_file = os.path.join(probe_dir, f"{concept_key}_{concept_value}.joblib")
+    if not os.path.exists(probe_file):
+        if verbose:
+            print(f"Probe file not found for {concept_key}_{concept_value}. Skipping.")
+        return outputs
+        
+    probe = joblib.load(probe_file)
+    torch_probe = convert_probe_to_pytorch(probe, device=resolve_device(model, submodule, autoencoder))
+    for p in torch_probe.parameters():
+        p.requires_grad_(False)
+    try:
+        print("Probe param device:", next(torch_probe.parameters()).device)
+    except Exception:
+        print("Probe param device:", None)
+
+    # Prepare dataset
+    train_dataset = prepare_dataset(
+        ud_train_filepath,
+        concept_key,
+        concept_value,
+        args.seed,
+        pos_tags=args.pos_tags,
+        exclude_values=args.exclude_values,
+        exclude_other_values=args.exclude_other_values,
+        drop_conflicts=args.drop_conflicts,
+    )
+    if train_dataset is None or len(train_dataset) < 128:
+        if verbose:
+            print(f"Not enough samples in training set for {concept_key}_{concept_value}. Skipping.")
+        return outputs
+
+    # Perform attribution patching
+    effects = attribution_patching_loop(train_dataset, model, torch_probe, submodule, autoencoder)
+
+    # Select top and bottom features
+    top_effects, bottom_effects = select_top_bottom_features(effects[submodule])
+
+    outputs = {
+        "top_1_percent": top_effects,
+        "bottom_1_percent": bottom_effects
+    }
+
+    output_file = os.path.join(output_dir, f"{concept_key}_{concept_value}.json")
+    dict_to_json(outputs, output_file)
+    if verbose:
+        print(f"Saved progress to {output_file}")
 
     return outputs
 
@@ -286,7 +293,7 @@ def select_top_bottom_features(effects):
     return top_effects, bottom_effects
 
 def feature_selection(args):
-    """Main function for feature selection across concepts and languages."""
+    """Main function for feature selection across concepts."""
     model, submodule, autoencoder = setup_model_and_autoencoder(
         args.model_name,
         device_map=args.device_map,
@@ -345,7 +352,6 @@ if __name__ == "__main__":
     parser.add_argument('--concept_value', type=str, default=None, help="Concept value for probing")
     parser.add_argument("--model_name", type=str, required=True, help="Name of the language model")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument('--language', type=str, default=None, help="Specific language to process (optional)")
     parser.add_argument("--ud_base_folder", type=str, default=UD_BASE_FOLDER, help="Base folder for UD treebanks")
     parser.add_argument("--ud_train_file", type=str, default=None, help="Override UD training .conllu path")
     parser.add_argument("--pos_tags", type=str, default=None, help="Comma-separated UPOS tags to filter by (e.g., VERB,AUX)")

@@ -11,7 +11,6 @@ from torch.utils.data import Dataset
 from src.autoencoder import GatedAutoEncoder
 import numpy as np
 from src.config import HF_TOKEN
-from collections import defaultdict
 
 
 def setup_model(model_name_or_path="meta-llama/Meta-Llama-3-8B", device="auto", torch_dtype=torch.float16):
@@ -88,21 +87,6 @@ def get_features_and_values(conll_file):
                 features[feat].update(values)
     return features
 
-def get_available_languages(ud_base_folder):
-    # Load the languages from data/language.json
-    with open('data/languages.json', 'r') as f:
-        valid_languages = set(json.load(f)["languages"])
-
-    languages = []
-    for folder in os.listdir(ud_base_folder):
-        if folder.startswith("UD_"):
-            language = folder[3:]  # Remove the "UD_" prefix
-            if not language.startswith(("Ancient", "Old")) and "-" not in language:
-                # Check if the language is in the valid_languages set
-                if language in valid_languages:
-                    languages.append(language)
-    return languages
-
 def get_available_concepts(probe_dir, concepts_path="data/concepts.json"):
     """Get all available concept combinations from probe files that are also in data/concepts.json."""
     valid_concepts = None
@@ -114,7 +98,7 @@ def get_available_concepts(probe_dir, concepts_path="data/concepts.json"):
     concepts = set()
     for file in probe_files:
         parts = os.path.basename(file).split('_')
-        if len(parts) >= 3:
+        if len(parts) >= 2:
             concept_key = parts[-2]
             concept_value = parts[-1].replace('.joblib', '')
             
@@ -185,26 +169,3 @@ def concept_filter(sentence, concept_key, concept_value):
         if concept_key in token.feats and concept_value in token.feats.get(concept_key, {}):
             return True
     return False
-
-def load_top_shared_features(feature_dir, concept_key, concept_value, languages, k):
-    feature_file = os.path.join(feature_dir, f"{concept_key}_{concept_value}.json")
-    if not os.path.exists(feature_file):
-        return None
-    
-    with open(feature_file, 'r') as f:
-        data = json.load(f)
-
-    # Collect top features for each language
-    feature_counts = defaultdict(int)
-    for language in languages:
-        if language not in data:
-            continue
-        top_features = set([feature for feature, _ in data[language]["top_1_percent"][:k]])
-        for feature in top_features:
-            feature_counts[feature] += 1
-
-    # Select features shared by at least 2 languages
-    shared_features = [feature for feature, count in feature_counts.items() if count >= 2]
-    shared_features.sort(key=lambda x: feature_counts[x], reverse=True)
-    
-    return shared_features[:k]  # Return top k shared features

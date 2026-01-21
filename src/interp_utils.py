@@ -27,14 +27,6 @@ TRACER_KWARGS = {
 }
 
 
-def get_task_languages(task):
-    languages = []
-    data_folder = "./data/"
-    task_folder = os.path.join(data_folder, task)
-    for filename in os.listdir(task_folder):
-        if filename.endswith(".json"):
-            languages.append(filename[:-5])
-    return languages
             
             
 def get_top_k_activations(model, submodule, tokens, autoencoder):
