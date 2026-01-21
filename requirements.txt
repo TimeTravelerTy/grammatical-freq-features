@@ -20,7 +20,7 @@ pandas>=1.5.0
 # NLP utilities
 pyconll>=3.0.0
 lemminflect>=0.2.3
-sae_lens>=2.0.0
+safetensors>=0.4.0
 
 # Tensor/array utilities
 einops>=0.6.0

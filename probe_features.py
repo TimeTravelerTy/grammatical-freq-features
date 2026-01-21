@@ -16,7 +16,7 @@ from tqdm import tqdm
 from nnsight import LanguageModel
 
 from src.config import HF_TOKEN
-from sae_lens import SAE
+from src.probing.sae_loader import load_local_sae
 from src.utils import setup_model, setup_autoencoder, dict_to_json
 from src.probing.attribution import attribution_patching
 from src.probing.data import MinimalPairDataset, ProbingDataset, balance_dataset
@@ -145,7 +145,7 @@ def resolve_device(model, submodule, autoencoder):
             return param.device
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def _build_model_with_transformers(model_name, device_map, torch_dtype):
+def _build_model_with_transformers(model_name, device_map, dtype):
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         padding_side="left",
@@ -154,7 +154,7 @@ def _build_model_with_transformers(model_name, device_map, torch_dtype):
     tokenizer.pad_token = tokenizer.eos_token
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         low_cpu_mem_usage=False,
         token=HF_TOKEN,
     )
@@ -180,19 +180,19 @@ def _extract_layer_index(hook_name):
     return None
 
 
-def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch.float16, load_with_transformers=False):
+def setup_model_and_autoencoder(model_name, device_map="cuda", dtype=torch.float16, load_with_transformers=False):
     """Set up the language model and autoencoder."""
     model = None
     if load_with_transformers:
         try:
-            model = _build_model_with_transformers(model_name, device_map, torch_dtype)
+            model = _build_model_with_transformers(model_name, device_map, dtype)
         except Exception:
             model = None
     if model is None:
         model_device_map = None if device_map in ["cuda", "cuda:0", "cpu"] else device_map
         model = LanguageModel(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             device_map=model_device_map,
             token=HF_TOKEN,
             low_cpu_mem_usage=False if model_device_map is None else True,
@@ -203,14 +203,13 @@ def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch
             except Exception:
                 pass
         if _has_meta_params(model.model):
-            model = _build_model_with_transformers(model_name, device_map, torch_dtype)
+            model = _build_model_with_transformers(model_name, device_map, dtype)
     if _has_meta_params(model.model):
         raise RuntimeError("Model parameters are still on meta device after loading; check device_map/model loading.")
     use_llama31_sae = "llama-3.1-8b" in model_name.lower()
     if use_llama31_sae:
-        autoencoder = SAE.from_pretrained(
-            repo_id="OpenMOSS-Team/Llama3_1-8B-Base-LXR-32x",
-            sae_id="L2R-32x",
+        autoencoder = load_local_sae(
+            "autoencoders/Llama3_1-8B-Base-L2R-32x",
             device="cuda" if torch.cuda.is_available() and device_map != "cpu" else "cpu",
         )
         hook_name = getattr(getattr(autoencoder, "cfg", None), "hook_name", None)
@@ -512,7 +511,7 @@ def feature_selection(args):
     model, submodule, autoencoder = setup_model_and_autoencoder(
         args.model_name,
         device_map=args.device_map,
-        torch_dtype=torch.float16 if args.device_map != "cpu" else torch.float32,
+        dtype=torch.float16 if args.device_map != "cpu" else torch.float32,
         load_with_transformers=args.load_with_transformers,
     )
     for p in model.model.parameters():
