@@ -73,6 +73,7 @@ docs/_build/
 
 outputs/
 logs/
+jobs/
 
 # PyBuilder
 .pybuilder/
