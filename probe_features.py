@@ -15,6 +15,7 @@ from tqdm import tqdm
 from nnsight import LanguageModel
 
 from src.config import HF_TOKEN
+from sparsify import Sae
 from src.utils import setup_model, setup_autoencoder, dict_to_json
 from src.probing.attribution import attribution_patching
 from src.probing.data import MinimalPairDataset, ProbingDataset, balance_dataset
@@ -195,9 +196,16 @@ def setup_model_and_autoencoder(model_name, device_map="cuda", torch_dtype=torch
             model = _build_model_with_transformers(model_name, device_map, torch_dtype)
     if _has_meta_params(model.model):
         raise RuntimeError("Model parameters are still on meta device after loading; check device_map/model loading.")
-    submodule = model.model.layers[16]
+    use_llama31_sae = "llama-3.1-8b" in model_name.lower()
+    layer_index = 2 if use_llama31_sae else 16
+    submodule = model.model.layers[layer_index]
     ae_device = resolve_submodule_device(model, submodule, fallback=device_map)
-    if "llama" in model_name:
+    if use_llama31_sae:
+        autoencoder = Sae.load_from_hub(
+            "EleutherAI/sae-llama-3.1-8b-32x",
+            hookpoint="layers.2.mlp",
+        ).to(ae_device)
+    elif "llama" in model_name:
         autoencoder = setup_autoencoder(device=ae_device)
     else:
         autoencoder = setup_autoencoder(checkpoint_path=AYA_AE_PATH, device=ae_device)
