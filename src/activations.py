@@ -4,7 +4,10 @@ This code has been copied and modified from [Sparse Feature Circuits](https://gi
 
 from __future__ import annotations
 import torch as t
-from torchtyping import TensorType
+try:
+    from torchtyping import TensorType
+except Exception:  # pragma: no cover - optional typing dependency
+    from typing import Any as TensorType
 
 
 
