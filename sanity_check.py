@@ -142,6 +142,12 @@ def main():
                         help="Log progress every N examples (0 disables).")
     parser.add_argument("--concept_key", type=str, default=None)
     parser.add_argument("--concept_value", type=str, default=None)
+    parser.add_argument(
+        "--concept_values",
+        type=str,
+        default=None,
+        help="Comma-separated list of concept values (overrides --concept_value).",
+    )
     parser.add_argument("--features_dir", type=str, default="outputs/probing/features/llama")
     parser.add_argument("--skip_model", action="store_true")
     args = parser.parse_args()
@@ -223,19 +229,44 @@ def main():
     print(f"Examples loaded: {len(examples)}")
     print(f"Variants: {', '.join(variants)}")
 
-    concept_features = load_concept_feature_indices(
-        args.features_dir, args.concept_key, args.concept_value, args.topk
-    )
-    if concept_features:
-        concept_features = [idx for idx in concept_features if idx < autoencoder.dict_size]
-        if not concept_features:
-            raise RuntimeError("No concept features fall within the autoencoder dictionary size.")
+    if args.concept_values:
+        concept_values = [v.strip() for v in args.concept_values.split(",") if v.strip()]
+    else:
+        concept_values = [args.concept_value] if args.concept_value else []
+
+    if concept_values and any(v.lower() == "all" for v in concept_values):
+        if not args.concept_key:
+            raise ValueError("`all` requires --concept_key to locate feature files.")
+        concept_values = []
+        for filename in os.listdir(args.features_dir):
+            if not filename.endswith(".json"):
+                continue
+            stem = filename[:-5]
+            if stem.startswith(f"{args.concept_key}_"):
+                concept_values.append(stem[len(args.concept_key) + 1 :])
+        concept_values = sorted(set(concept_values))
+
+    concept_feature_sets = {}
+    if concept_values:
+        for value in concept_values:
+            features = load_concept_feature_indices(
+                args.features_dir, args.concept_key, value, args.topk
+            )
+            if features:
+                features = [idx for idx in features if idx < autoencoder.dict_size]
+                if not features:
+                    raise RuntimeError(
+                        f"No concept features fall within the autoencoder dictionary size for {value}."
+                    )
+                concept_feature_sets[value] = features
 
     if args.top_sentences > 0:
         top_n = args.top_sentences
         include_special_tokens = args.include_special_tokens
         special_ids = set(model.tokenizer.all_special_ids)
-        heaps = {idx: [] for idx in concept_features} if concept_features else {}
+        heaps = {}
+        for value, features in concept_feature_sets.items():
+            heaps[value] = {idx: [] for idx in features}
         counter = count()
         start = time.time()
         last_log = start
@@ -292,12 +323,28 @@ def main():
                         feats = feats.clone()
                         feats[mask, :] = float("-inf")
 
-                if concept_features:
-                    vals = feats[:, concept_features]
-                    max_vals, max_pos = vals.max(dim=0)
-                    max_vals = max_vals.detach().cpu().tolist()
-                    max_pos = max_pos.detach().cpu().tolist()
-                    feature_ids = concept_features
+                if concept_feature_sets:
+                    for value, features in concept_feature_sets.items():
+                        vals = feats[:, features]
+                        max_vals, max_pos = vals.max(dim=0)
+                        max_vals = max_vals.detach().cpu().tolist()
+                        max_pos = max_pos.detach().cpu().tolist()
+                        for feat_idx, val, pos in zip(features, max_vals, max_pos):
+                            if val == float("-inf"):
+                                continue
+                            token = token_strings[pos] if 0 <= pos < len(token_strings) else None
+                            meta = {
+                                "sentence": sentence,
+                                "variant": variant,
+                                "group": ex.get("group"),
+                                "subtask": ex.get("subtask"),
+                                "idx": ex.get("idx"),
+                                "token": token,
+                                "token_pos": pos,
+                                "concept_value": value,
+                            }
+                            heap = heaps[value].setdefault(feat_idx, [])
+                            push_top(heap, val, meta, top_n)
                 else:
                     feat_max = feats.max(dim=0).values
                     if feat_max.numel() == 0:
@@ -309,36 +356,38 @@ def main():
                     vals = feats[:, feature_ids]
                     _, max_pos_tensor = vals.max(dim=0)
                     max_pos = max_pos_tensor.detach().cpu().tolist()
-
-                for feat_idx, val, pos in zip(feature_ids, max_vals, max_pos):
-                    if val == float("-inf"):
-                        continue
-                    token = token_strings[pos] if 0 <= pos < len(token_strings) else None
-                    meta = {
-                        "sentence": sentence,
-                        "variant": variant,
-                        "group": ex.get("group"),
-                        "subtask": ex.get("subtask"),
-                        "idx": ex.get("idx"),
-                        "token": token,
-                        "token_pos": pos,
-                    }
-                    heap = heaps.setdefault(feat_idx, [])
-                    push_top(heap, val, meta, top_n)
+                    for feat_idx, val, pos in zip(feature_ids, max_vals, max_pos):
+                        if val == float("-inf"):
+                            continue
+                        token = token_strings[pos] if 0 <= pos < len(token_strings) else None
+                        meta = {
+                            "sentence": sentence,
+                            "variant": variant,
+                            "group": ex.get("group"),
+                            "subtask": ex.get("subtask"),
+                            "idx": ex.get("idx"),
+                            "token": token,
+                            "token_pos": pos,
+                        }
+                        heap = heaps.setdefault("all", {}).setdefault(feat_idx, [])
+                        push_top(heap, val, meta, top_n)
 
         print(f"\nTop {top_n} sentences per feature:")
-        for feat_idx in sorted(heaps.keys()):
-            print(f"\nFeature {feat_idx}:")
-            heap = heaps.get(feat_idx, [])
-            if not heap:
-                print("  (no matches)")
-                continue
-            for score, _, meta in sorted(heap, key=lambda x: x[0], reverse=True):
-                token = meta.get("token")
-                token_pos = meta.get("token_pos")
-                header = f"[{meta.get('group')}:{meta.get('subtask')}] idx={meta.get('idx')} {meta.get('variant')}"
-                print(f"  {score:.4f} {header} token={token} pos={token_pos}")
-                print(f"    {meta.get('sentence')}")
+        for value in sorted(heaps.keys()):
+            if value != "all":
+                print(f"\nConcept value: {value}")
+            for feat_idx in sorted(heaps[value].keys()):
+                print(f"\nFeature {feat_idx}:")
+                heap = heaps[value].get(feat_idx, [])
+                if not heap:
+                    print("  (no matches)")
+                    continue
+                for score, _, meta in sorted(heap, key=lambda x: x[0], reverse=True):
+                    token = meta.get("token")
+                    token_pos = meta.get("token_pos")
+                    header = f"[{meta.get('group')}:{meta.get('subtask')}] idx={meta.get('idx')} {meta.get('variant')}"
+                    print(f"  {score:.4f} {header} token={token} pos={token_pos}")
+                    print(f"    {meta.get('sentence')}")
         return
 
     for ex in examples:
@@ -372,18 +421,19 @@ def main():
                 print("    WARNING: empty feature vector; check autoencoder checkpoint/device.")
                 continue
 
-            if concept_features:
-                valid = [idx for idx in concept_features if idx < feat_max.numel()]
-                if not valid:
-                    print("    WARNING: no concept features within autoencoder dictionary size.")
-                    continue
-                values = [(idx, feat_max[idx].item()) for idx in valid]
-                values.sort(key=lambda x: x[1], reverse=True)
-                k = min(args.topk, len(values))
-                print(f"  {variant}: {sentence}")
-                print(f"    Concept features (top {k} of {len(values)}):")
-                for idx, val in values[:k]:
-                    print(f"      {idx}: {val:.4f}")
+            if concept_feature_sets:
+                for value, features in concept_feature_sets.items():
+                    valid = [idx for idx in features if idx < feat_max.numel()]
+                    if not valid:
+                        print(f"    WARNING: no concept features within autoencoder dictionary size for {value}.")
+                        continue
+                    values = [(idx, feat_max[idx].item()) for idx in valid]
+                    values.sort(key=lambda x: x[1], reverse=True)
+                    k = min(args.topk, len(values))
+                    print(f"  {variant}: {sentence}")
+                    print(f"    Concept {value} features (top {k} of {len(values)}):")
+                    for idx, val in values[:k]:
+                        print(f"      {idx}: {val:.4f}")
             else:
                 k = min(args.topk, feat_max.numel())
                 top_vals, top_idx = torch.topk(feat_max, k)
