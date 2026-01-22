@@ -131,6 +131,8 @@ def main():
                         choices=["good_original", "bad_original", "good_rare", "bad_rare"])
     parser.add_argument("--variants", type=str, default=None,
                         help="Comma-separated list of variants (overrides --variant)")
+    parser.add_argument(
+        "--num_examples", type=int, default=1000, help="Optional cap on examples (default: 1000).")
     parser.add_argument("--topk", type=int, default=32)
     parser.add_argument("--top_sentences", type=int, default=5,
                         help="Top sentences to keep per feature (0 disables ranking mode).")
@@ -393,9 +395,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    parser.add_argument(
-        "--num_examples",
-        type=int,
-        default=1000,
-        help="Optional cap on examples (default: 1000).",
-    )
