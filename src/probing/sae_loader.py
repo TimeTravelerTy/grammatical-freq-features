@@ -62,20 +62,52 @@ class LocalSAE(nn.Module):
         w_dec = self.w_dec
         if w_enc.dim() != 2 or w_dec.dim() != 2:
             raise ValueError("Expected 2D SAE weights.")
+        b_enc = self.b_enc
+        b_dec = self.b_dec
 
-        if w_enc.shape[1] == w_dec.shape[0]:
-            self._enc_transpose = False
-            self._dec_transpose = False
-            self._d_model = w_enc.shape[0]
-            self._d_sae = w_enc.shape[1]
-        elif w_enc.shape[0] == w_dec.shape[1]:
-            self._enc_transpose = True
-            self._dec_transpose = True
-            self._d_model = w_enc.shape[1]
-            self._d_sae = w_enc.shape[0]
+        # Prefer bias shapes to infer orientation.
+        if b_enc is not None:
+            if b_enc.numel() == w_enc.shape[0]:
+                self._enc_transpose = True
+                self._d_sae = w_enc.shape[0]
+                self._d_model = w_enc.shape[1]
+            elif b_enc.numel() == w_enc.shape[1]:
+                self._enc_transpose = False
+                self._d_sae = w_enc.shape[1]
+                self._d_model = w_enc.shape[0]
+            else:
+                raise ValueError(
+                    f"Encoder bias shape {tuple(b_enc.shape)} does not match W_enc {tuple(w_enc.shape)}"
+                )
         else:
+            # Fall back to assuming encoder is (d_sae, d_model).
+            self._enc_transpose = True
+            self._d_sae = w_enc.shape[0]
+            self._d_model = w_enc.shape[1]
+
+        expected_enc_shape = (self._d_sae, self._d_model) if self._enc_transpose else (self._d_model, self._d_sae)
+        if tuple(w_enc.shape) != expected_enc_shape:
             raise ValueError(
-                f"Unexpected SAE weight shapes: W_enc={tuple(w_enc.shape)}, W_dec={tuple(w_dec.shape)}"
+                f"Encoder weight shape {tuple(w_enc.shape)} does not match expected {expected_enc_shape}"
+            )
+
+        if b_dec is not None:
+            if b_dec.numel() == w_dec.shape[0]:
+                self._dec_transpose = True
+            elif b_dec.numel() == w_dec.shape[1]:
+                self._dec_transpose = False
+            else:
+                raise ValueError(
+                    f"Decoder bias shape {tuple(b_dec.shape)} does not match W_dec {tuple(w_dec.shape)}"
+                )
+        else:
+            # Assume decoder is (d_model, d_sae), requiring transpose.
+            self._dec_transpose = True
+
+        expected_dec_shape = (self._d_model, self._d_sae) if self._dec_transpose else (self._d_sae, self._d_model)
+        if tuple(w_dec.shape) != expected_dec_shape:
+            raise ValueError(
+                f"Decoder weight shape {tuple(w_dec.shape)} does not match expected {expected_dec_shape}"
             )
 
     def _linear(self, x, weight, bias, transpose):
