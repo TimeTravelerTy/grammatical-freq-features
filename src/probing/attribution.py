@@ -131,29 +131,34 @@ def attribution_patching(
             is_tuple[submodule] = isinstance(submodule.output, tuple)
 
     def _collect_hidden_states(inputs, logprob_positions=None):
-        states = {}
         logits = None
+        saved_outputs = {}
         with model.trace(inputs, **TRACER_KWARGS), torch.no_grad():
             if logprob_positions is not None:
                 logits = model.output[0].save()
             for submodule in submodules:
-                dictionary = dictionaries[submodule]
                 x = submodule.output
                 if is_tuple[submodule]:
                     x = x[0]
-                if hasattr(x, "device") and x.device.type != "meta":
-                    dict_param = next(dictionary.parameters())
-                    dict_device = dict_param.device
-                    dict_dtype = dict_param.dtype
-                    if dict_device != x.device or dict_dtype != x.dtype:
-                        dictionary = dictionary.to(device=x.device, dtype=x.dtype)
-                        dictionaries[submodule] = dictionary
-                f = dictionary.encode(x)
-                f = f.to(dtype=next(dictionary.parameters()).dtype)
-                x_hat = dictionary.decode(f)
-                residual = x - x_hat
-                states[submodule] = SparseActivation(act=f.save(), res=residual.save())
-        states = {k: v.value for k, v in states.items()}
+                saved_outputs[submodule] = x.save()
+
+        states = {}
+        for submodule in submodules:
+            dictionary = dictionaries[submodule]
+            x = saved_outputs[submodule].value
+            if hasattr(x, "device") and x.device.type != "meta":
+                dict_param = next(dictionary.parameters())
+                dict_device = dict_param.device
+                dict_dtype = dict_param.dtype
+                if dict_device != x.device or dict_dtype != x.dtype:
+                    dictionary = dictionary.to(device=x.device, dtype=x.dtype)
+                    dictionaries[submodule] = dictionary
+            f = dictionary.encode(x)
+            f = f.to(dtype=next(dictionary.parameters()).dtype)
+            x_hat = dictionary.decode(f)
+            residual = x - x_hat
+            states[submodule] = SparseActivation(act=f, res=residual)
+
         logprob = None
         if logits is not None:
             logprob = logprob_sum_from_logits(
