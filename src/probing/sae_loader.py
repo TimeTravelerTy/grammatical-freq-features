@@ -113,6 +113,8 @@ class LocalSAE(nn.Module):
     def _linear(self, x, weight, bias, transpose):
         if transpose:
             weight = weight.t()
+        if x.dtype != weight.dtype:
+            x = x.to(weight.dtype)
         out = x @ weight
         if bias is not None:
             out = out + bias
