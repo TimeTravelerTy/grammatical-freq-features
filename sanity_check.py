@@ -2,6 +2,7 @@ import argparse
 import heapq
 import json
 import os
+import re
 import time
 from itertools import count
 
@@ -10,6 +11,7 @@ from nnsight import LanguageModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import HF_TOKEN
+from src.probing.sae_loader import load_local_sae
 from src.utils import setup_autoencoder
 
 
@@ -23,7 +25,7 @@ def _has_meta_params(module):
     return False
 
 
-def _build_model_with_transformers(model_name, device_map, torch_dtype):
+def _build_model_with_transformers(model_name, device_map, dtype):
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         padding_side="left",
@@ -32,7 +34,7 @@ def _build_model_with_transformers(model_name, device_map, torch_dtype):
     tokenizer.pad_token = tokenizer.eos_token
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         low_cpu_mem_usage=False,
         token=HF_TOKEN,
     )
@@ -160,13 +162,13 @@ def main():
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available; pass --device cpu or use a GPU node.")
 
-    torch_dtype = torch.float32 if args.device == "cpu" else torch.float16
+    dtype = torch.float32 if args.device == "cpu" else torch.float16
     model = None
     model_device_map = None if args.device in ["cuda", "cuda:0", "cpu"] else args.device
     try:
         model = LanguageModel(
             args.model_name,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             device_map=model_device_map,
             token=HF_TOKEN,
             low_cpu_mem_usage=False if model_device_map is None else True,
@@ -177,15 +179,26 @@ def main():
             except Exception:
                 pass
         if _has_meta_params(model.model):
-            model = _build_model_with_transformers(args.model_name, args.device, torch_dtype)
+            model = _build_model_with_transformers(args.model_name, args.device, dtype)
     except Exception:
-        model = _build_model_with_transformers(args.model_name, args.device, torch_dtype)
+        model = _build_model_with_transformers(args.model_name, args.device, dtype)
     if _has_meta_params(model.model):
         raise RuntimeError("Model parameters are still on meta device after loading; check device/device_map.")
 
-    submodule = model.model.layers[args.layer]
+    use_local_sae = os.path.isdir(args.autoencoder_path)
+    if use_local_sae:
+        autoencoder = load_local_sae(args.autoencoder_path, device=args.device)
+        hook_name = getattr(getattr(autoencoder, "cfg", None), "hook_name", None)
+        layer_index = _extract_layer_index(hook_name) or args.layer
+    else:
+        layer_index = args.layer
+    submodule = model.model.layers[layer_index]
     ae_device = resolve_submodule_device(model, submodule, fallback=args.device)
-    autoencoder = setup_autoencoder(checkpoint_path=args.autoencoder_path, device=ae_device)
+    if use_local_sae:
+        if hasattr(autoencoder, "to"):
+            autoencoder = autoencoder.to(ae_device)
+    else:
+        autoencoder = setup_autoencoder(checkpoint_path=args.autoencoder_path, device=ae_device)
 
     def _dev(mod):
         try:
@@ -351,3 +364,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+def _extract_layer_index(hook_name):
+    if not hook_name:
+        return None
+    match = re.search(r"(?:layers|blocks)\\.(\\d+)", hook_name)
+    if match:
+        return int(match.group(1))
+    return None
