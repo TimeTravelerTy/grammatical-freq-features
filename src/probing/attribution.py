@@ -162,8 +162,9 @@ def attribution_patching(
 
         logprob = None
         if logits is not None:
+            logits_tensor = logits.value if hasattr(logits, "value") else logits
             logprob = logprob_sum_from_logits(
-                logits.value,
+                logits_tensor,
                 inputs["input_ids"],
                 logprob_positions,
             )
