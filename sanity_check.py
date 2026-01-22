@@ -127,7 +127,6 @@ def main():
     parser.add_argument("--autoencoder_path", type=str, default="autoencoders/llama-3-8b-layer16.pt")
     parser.add_argument("--device", type=str, default="cuda", help="cuda/cpu/auto (cuda default enforces GPU)")
     parser.add_argument("--layer", type=int, default=16)
-    parser.add_argument("--num_examples", type=int, default=2)
     parser.add_argument("--variant", type=str, default="good_original",
                         choices=["good_original", "bad_original", "good_rare", "bad_rare"])
     parser.add_argument("--variants", type=str, default=None,
@@ -151,7 +150,7 @@ def main():
     else:
         print("No concepts file found yet (data/concepts.json).")
 
-    examples = load_freqblimp_examples(args.freqblimp_file, args.num_examples)
+    examples = load_freqblimp_examples(args.freqblimp_file, None)
     if not examples:
         raise RuntimeError(f"No examples found in {args.freqblimp_file}")
 
