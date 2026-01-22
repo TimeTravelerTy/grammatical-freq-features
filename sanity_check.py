@@ -230,11 +230,11 @@ def main():
         if not concept_features:
             raise RuntimeError("No concept features fall within the autoencoder dictionary size.")
 
-    if concept_features and args.top_sentences > 0:
+    if args.top_sentences > 0:
         top_n = args.top_sentences
         include_special_tokens = args.include_special_tokens
         special_ids = set(model.tokenizer.all_special_ids)
-        heaps = {idx: [] for idx in concept_features}
+        heaps = {idx: [] for idx in concept_features} if concept_features else {}
         counter = count()
         start = time.time()
         last_log = start
@@ -278,18 +278,38 @@ def main():
                 ae_device = next(autoencoder.parameters()).device
                 acts = acts.to(ae_device)
                 feats = autoencoder.encode(acts)
-                if feats.dim() != 2 or feats.numel() == 0:
+                if feats.numel() == 0:
                     continue
-                vals = feats[:, concept_features]
+                if feats.dim() == 1:
+                    feats = feats.unsqueeze(0)
+                if feats.dim() != 2:
+                    continue
+
                 if not include_special_tokens and special_ids:
-                    mask = torch.tensor([tid in special_ids for tid in token_ids], device=vals.device)
+                    mask = torch.tensor([tid in special_ids for tid in token_ids], device=feats.device)
                     if mask.any():
-                        vals = vals.clone()
-                        vals[mask, :] = float("-inf")
-                max_vals, max_pos = vals.max(dim=0)
-                max_vals = max_vals.detach().cpu().tolist()
-                max_pos = max_pos.detach().cpu().tolist()
-                for feat_idx, val, pos in zip(concept_features, max_vals, max_pos):
+                        feats = feats.clone()
+                        feats[mask, :] = float("-inf")
+
+                if concept_features:
+                    vals = feats[:, concept_features]
+                    max_vals, max_pos = vals.max(dim=0)
+                    max_vals = max_vals.detach().cpu().tolist()
+                    max_pos = max_pos.detach().cpu().tolist()
+                    feature_ids = concept_features
+                else:
+                    feat_max = feats.max(dim=0).values
+                    if feat_max.numel() == 0:
+                        continue
+                    k = min(args.topk, feat_max.numel())
+                    max_vals, feature_ids = torch.topk(feat_max, k)
+                    feature_ids = feature_ids.detach().cpu().tolist()
+                    max_vals = max_vals.detach().cpu().tolist()
+                    vals = feats[:, feature_ids]
+                    _, max_pos_tensor = vals.max(dim=0)
+                    max_pos = max_pos_tensor.detach().cpu().tolist()
+
+                for feat_idx, val, pos in zip(feature_ids, max_vals, max_pos):
                     if val == float("-inf"):
                         continue
                     token = token_strings[pos] if 0 <= pos < len(token_strings) else None
@@ -302,10 +322,11 @@ def main():
                         "token": token,
                         "token_pos": pos,
                     }
-                    push_top(heaps[feat_idx], val, meta, top_n)
+                    heap = heaps.setdefault(feat_idx, [])
+                    push_top(heap, val, meta, top_n)
 
         print(f"\nTop {top_n} sentences per feature:")
-        for feat_idx in concept_features:
+        for feat_idx in sorted(heaps.keys()):
             print(f"\nFeature {feat_idx}:")
             heap = heaps.get(feat_idx, [])
             if not heap:
