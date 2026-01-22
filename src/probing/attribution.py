@@ -134,13 +134,13 @@ def attribution_patching(
         logits = None
         saved_outputs = {}
         with model.trace(inputs, **TRACER_KWARGS), torch.no_grad():
-            if logprob_positions is not None:
-                logits = model.output[0].save()
             for submodule in submodules:
                 x = submodule.output
                 if is_tuple[submodule]:
                     x = x[0]
                 saved_outputs[submodule] = x.save()
+            if logprob_positions is not None:
+                logits = model.output[0].save()
 
         states = {}
         for submodule in submodules:
