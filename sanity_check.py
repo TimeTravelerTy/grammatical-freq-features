@@ -110,6 +110,15 @@ def parse_variants(args):
     return [args.variant]
 
 
+def _extract_layer_index(hook_name):
+    if not hook_name:
+        return None
+    match = re.search(r"(?:layers|blocks)\.(\d+)", hook_name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sanity check for model+SAE on freqBLiMP.")
     parser.add_argument("--model_name", type=str, required=True, help="Model name or path (e.g., meta-llama/Meta-Llama-3-8B)")
@@ -364,10 +373,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-def _extract_layer_index(hook_name):
-    if not hook_name:
-        return None
-    match = re.search(r"(?:layers|blocks)\\.(\\d+)", hook_name)
-    if match:
-        return int(match.group(1))
-    return None
