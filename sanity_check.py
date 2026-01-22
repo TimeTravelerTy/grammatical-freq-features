@@ -11,6 +11,7 @@ from nnsight import LanguageModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import HF_TOKEN
+from src.probing.lingualens import DEFAULT_FEATURES, load_lingualens_pairs
 from src.probing.sae_loader import load_local_sae
 from src.utils import setup_autoencoder
 
@@ -134,8 +135,12 @@ def main():
     )
     parser.add_argument("--device", type=str, default="cuda", help="cuda/cpu/auto (cuda default enforces GPU)")
     parser.add_argument("--layer", type=int, default=2)
-    parser.add_argument("--variant", type=str, default="good_original",
-                        choices=["good_original", "bad_original", "good_rare", "bad_rare"])
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="good_original",
+        choices=["good_original", "bad_original", "good_rare", "bad_rare", "clean", "patch"],
+    )
     parser.add_argument("--variants", type=str, default=None,
                         help="Comma-separated list of variants (overrides --variant)")
     parser.add_argument(
@@ -157,6 +162,26 @@ def main():
     )
     parser.add_argument("--features_dir", type=str, default="outputs/probing/features/llama")
     parser.add_argument("--skip_model", action="store_true")
+    parser.add_argument("--lingualens", action="store_true", help="Use LinguaLens pairs instead of freqBLiMP.")
+    parser.add_argument(
+        "--lingualens_features",
+        type=str,
+        default=",".join(DEFAULT_FEATURES),
+        help="Comma-separated LinguaLens features to include.",
+    )
+    parser.add_argument("--lingualens_split", type=str, default="train")
+    parser.add_argument(
+        "--lingualens_max_pairs",
+        type=int,
+        default=None,
+        help="Optional cap on LinguaLens pairs.",
+    )
+    parser.add_argument(
+        "--lingualens_variants",
+        type=str,
+        default="clean,patch",
+        help="Comma-separated variant keys to use for LinguaLens.",
+    )
     parser.add_argument(
         "--feature_index",
         type=int,
@@ -177,11 +202,36 @@ def main():
     else:
         print("No concepts file found yet (data/concepts.json).")
 
-    examples = load_freqblimp_examples(args.freqblimp_file, args.num_examples)
+    if args.lingualens:
+        lingualens_features = [f.strip() for f in args.lingualens_features.split(",") if f.strip()]
+        pairs = load_lingualens_pairs(
+            split=args.lingualens_split,
+            language="English",
+            categories=("syntax", "morphology"),
+            features=lingualens_features,
+            max_samples=args.lingualens_max_pairs,
+            seed=42,
+        )
+        examples = []
+        for pair in pairs:
+            examples.append(
+                {
+                    "group": pair.get("feature"),
+                    "subtask": ",".join(pair.get("categories", [])),
+                    "idx": pair.get("pair_index"),
+                    "clean": pair.get("sentence"),
+                    "patch": pair.get("patch_sentence"),
+                }
+            )
+    else:
+        examples = load_freqblimp_examples(args.freqblimp_file, args.num_examples)
     if not examples:
-        raise RuntimeError(f"No examples found in {args.freqblimp_file}")
+        raise RuntimeError("No examples found; check dataset selection.")
 
-    variants = parse_variants(args)
+    if args.lingualens:
+        variants = [v.strip() for v in args.lingualens_variants.split(",") if v.strip()]
+    else:
+        variants = parse_variants(args)
 
     if args.skip_model:
         for ex in examples:
