@@ -376,7 +376,10 @@ def main():
         for value in sorted(heaps.keys()):
             if value != "all":
                 print(f"\nConcept value: {value}")
-            for feat_idx in sorted(heaps[value].keys()):
+            feature_list = concept_feature_sets.get(value)
+            if feature_list is None:
+                feature_list = sorted(heaps[value].keys())
+            for feat_idx in feature_list:
                 print(f"\nFeature {feat_idx}:")
                 heap = heaps[value].get(feat_idx, [])
                 if not heap:
