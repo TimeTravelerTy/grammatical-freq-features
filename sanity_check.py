@@ -150,7 +150,7 @@ def main():
     else:
         print("No concepts file found yet (data/concepts.json).")
 
-    examples = load_freqblimp_examples(args.freqblimp_file, None)
+    examples = load_freqblimp_examples(args.freqblimp_file, args.num_examples)
     if not examples:
         raise RuntimeError(f"No examples found in {args.freqblimp_file}")
 
@@ -393,3 +393,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    parser.add_argument(
+        "--num_examples",
+        type=int,
+        default=1000,
+        help="Optional cap on examples (default: 1000).",
+    )
