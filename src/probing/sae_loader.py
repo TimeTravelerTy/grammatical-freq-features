@@ -7,6 +7,13 @@ import torch.nn as nn
 from safetensors.torch import load_file
 
 
+def _first_tensor(state, keys):
+    for key in keys:
+        if key in state:
+            return state[key]
+    return None
+
+
 def _load_json(path):
     if not path or not os.path.exists(path):
         return {}
@@ -29,13 +36,13 @@ class LocalSAE(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        w_enc = state.get("W_enc") or state.get("encoder.weight") or state.get("encoder_W")
-        w_dec = state.get("W_dec") or state.get("decoder.weight") or state.get("decoder_W")
+        w_enc = _first_tensor(state, ("W_enc", "encoder.weight", "encoder_W"))
+        w_dec = _first_tensor(state, ("W_dec", "decoder.weight", "decoder_W"))
         if w_enc is None or w_dec is None:
             raise KeyError("Missing encoder/decoder weights in SAE state dict.")
 
-        b_enc = state.get("b_enc") or state.get("encoder.bias") or state.get("encoder_b")
-        b_dec = state.get("b_dec") or state.get("decoder.bias") or state.get("decoder_b")
+        b_enc = _first_tensor(state, ("b_enc", "encoder.bias", "encoder_b"))
+        b_dec = _first_tensor(state, ("b_dec", "decoder.bias", "decoder_b"))
 
         self.w_enc = nn.Parameter(w_enc, requires_grad=False)
         self.w_dec = nn.Parameter(w_dec, requires_grad=False)
