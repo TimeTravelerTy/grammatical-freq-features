@@ -145,7 +145,8 @@ def attribution_patching(
         states = {}
         for submodule in submodules:
             dictionary = dictionaries[submodule]
-            x = saved_outputs[submodule].value
+            saved = saved_outputs[submodule]
+            x = saved.value if hasattr(saved, "value") else saved
             if hasattr(x, "device") and x.device.type != "meta":
                 dict_param = next(dictionary.parameters())
                 dict_device = dict_param.device
