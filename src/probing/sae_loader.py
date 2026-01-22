@@ -129,13 +129,16 @@ class LocalSAE(nn.Module):
 
 
 def load_local_sae(path, device="cpu"):
-    state_path = os.path.join(path, "final.safetensors")
+    base_dir = path
+    if os.path.isfile(path):
+        base_dir = os.path.dirname(path)
+    state_path = os.path.join(base_dir, "final.safetensors")
     if not os.path.exists(state_path):
         raise FileNotFoundError(f"Missing SAE weights at {state_path}")
 
     state = load_file(state_path, device=device)
-    hyperparams = _load_json(os.path.join(path, "hyperparams.json"))
-    lm_config = _load_json(os.path.join(path, "lm_config.json"))
+    hyperparams = _load_json(os.path.join(base_dir, "hyperparams.json"))
+    lm_config = _load_json(os.path.join(base_dir, "lm_config.json"))
     hook_name = _extract_hook_name(hyperparams, lm_config)
     cfg = SimpleNamespace(**hyperparams)
     cfg.hook_name = hook_name

@@ -126,16 +126,21 @@ def main():
     parser.add_argument("--model_name", type=str, required=True, help="Model name or path (e.g., meta-llama/Meta-Llama-3-8B)")
     parser.add_argument("--freqblimp_file", type=str, default="data/freqBLiMP/freqBLiMP_xtail.jsonl")
     parser.add_argument("--concepts_file", type=str, default="data/concepts.json")
-    parser.add_argument("--autoencoder_path", type=str, default="autoencoders/llama-3-8b-layer16.pt")
+    parser.add_argument(
+        "--autoencoder_path",
+        type=str,
+        default="autoencoders/Llama3_1-8B-Base-L2R-32x",
+        help="SAE directory or checkpoint path (e.g., autoencoders/Llama3_1-8B-Base-L2R-32x).",
+    )
     parser.add_argument("--device", type=str, default="cuda", help="cuda/cpu/auto (cuda default enforces GPU)")
-    parser.add_argument("--layer", type=int, default=16)
+    parser.add_argument("--layer", type=int, default=2)
     parser.add_argument("--variant", type=str, default="good_original",
                         choices=["good_original", "bad_original", "good_rare", "bad_rare"])
     parser.add_argument("--variants", type=str, default=None,
                         help="Comma-separated list of variants (overrides --variant)")
     parser.add_argument(
         "--num_examples", type=int, default=1000, help="Optional cap on examples (default: 1000).")
-    parser.add_argument("--topk", type=int, default=32)
+    parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--top_sentences", type=int, default=5,
                         help="Top sentences to keep per feature (0 disables ranking mode).")
     parser.add_argument("--include_special_tokens", action="store_true",
@@ -152,6 +157,18 @@ def main():
     )
     parser.add_argument("--features_dir", type=str, default="outputs/probing/features/llama")
     parser.add_argument("--skip_model", action="store_true")
+    parser.add_argument(
+        "--feature_index",
+        type=int,
+        default=None,
+        help="Scan a specific SAE feature index across examples.",
+    )
+    parser.add_argument(
+        "--feature_threshold",
+        type=float,
+        default=0.0,
+        help="Activation threshold for printing hits when scanning a feature.",
+    )
     args = parser.parse_args()
 
     concept_summary = summarize_concepts(args.concepts_file)
@@ -230,6 +247,103 @@ def main():
     print("AE param device:", _dev(autoencoder))
     print(f"Examples loaded: {len(examples)}")
     print(f"Variants: {', '.join(variants)}")
+
+    if args.feature_index is not None:
+        feature_idx = args.feature_index
+        top_n = args.top_sentences
+        include_special_tokens = args.include_special_tokens
+        special_ids = set(model.tokenizer.all_special_ids)
+        heap = []
+        counter = count()
+        start = time.time()
+        last_log = start
+
+        def push_top(score, meta, limit):
+            if limit <= 0:
+                return
+            entry = (score, next(counter), meta)
+            if len(heap) < limit:
+                heapq.heappush(heap, entry)
+            elif score > heap[0][0]:
+                heapq.heapreplace(heap, entry)
+
+        for ex_i, ex in enumerate(examples, start=1):
+            if args.log_every and ex_i % args.log_every == 0:
+                now = time.time()
+                elapsed = now - last_log
+                total = now - start
+                print(f"Processed {ex_i}/{len(examples)} examples (+{elapsed:.1f}s, total {total:.1f}s)")
+                last_log = now
+            for variant in variants:
+                sentence = ex.get(variant)
+                if not sentence:
+                    continue
+                tokenized = model.tokenizer(sentence, return_tensors="pt", padding=False)
+                input_ids = tokenized["input_ids"]
+                if input_ids.dim() == 1:
+                    input_ids = input_ids.unsqueeze(0)
+                token_ids = input_ids[0].tolist()
+                token_strings = model.tokenizer.convert_ids_to_tokens(token_ids)
+                if hasattr(model, "device"):
+                    input_ids = input_ids.to(model.device)
+                with model.trace(input_ids, **TRACER_KWARGS), torch.no_grad():
+                    internal_acts = submodule.output[0].save()
+                acts = internal_acts
+                if hasattr(acts, "dim"):
+                    if acts.dim() == 3:
+                        acts = acts[0]
+                    elif acts.dim() != 2:
+                        raise RuntimeError(f"Unexpected activations shape: {tuple(acts.shape)}")
+                ae_device = next(autoencoder.parameters()).device
+                acts = acts.to(ae_device)
+                feats = autoencoder.encode(acts)
+                if feats.numel() == 0:
+                    continue
+                if feats.dim() == 1:
+                    feats = feats.unsqueeze(0)
+                if feats.dim() != 2:
+                    continue
+                if feature_idx >= feats.shape[1]:
+                    raise RuntimeError(
+                        f"Feature index {feature_idx} exceeds SAE size {feats.shape[1]}"
+                    )
+
+                if not include_special_tokens and special_ids:
+                    mask = torch.tensor([tid in special_ids for tid in token_ids], device=feats.device)
+                    if mask.any():
+                        feats = feats.clone()
+                        feats[mask, feature_idx] = float("-inf")
+
+                col = feats[:, feature_idx]
+                val, pos = col.max(dim=0)
+                score = val.item()
+                token = token_strings[pos.item()] if 0 <= pos.item() < len(token_strings) else None
+                meta = {
+                    "sentence": sentence,
+                    "variant": variant,
+                    "group": ex.get("group"),
+                    "subtask": ex.get("subtask"),
+                    "idx": ex.get("idx"),
+                    "token": token,
+                    "token_pos": pos.item(),
+                }
+                if score > args.feature_threshold:
+                    print(
+                        f"{score:.4f} [{meta.get('group')}:{meta.get('subtask')}] "
+                        f"idx={meta.get('idx')} {meta.get('variant')} "
+                        f"token={token} pos={meta.get('token_pos')}"
+                    )
+                    print(f"  {sentence}")
+                push_top(score, meta, top_n)
+
+        print(f"\nTop {top_n} sentences for feature {feature_idx}:")
+        for score, _, meta in sorted(heap, key=lambda x: x[0], reverse=True):
+            token = meta.get("token")
+            token_pos = meta.get("token_pos")
+            header = f"[{meta.get('group')}:{meta.get('subtask')}] idx={meta.get('idx')} {meta.get('variant')}"
+            print(f"  {score:.4f} {header} token={token} pos={token_pos}")
+            print(f"    {meta.get('sentence')}")
+        return
 
     if args.concept_values:
         concept_values = [v.strip() for v in args.concept_values.split(",") if v.strip()]
