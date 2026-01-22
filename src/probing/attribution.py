@@ -148,8 +148,6 @@ def attribution_patching(
                     if dict_device != x.device or dict_dtype != x.dtype:
                         dictionary = dictionary.to(device=x.device, dtype=x.dtype)
                         dictionaries[submodule] = dictionary
-                    if hasattr(probe, "to"):
-                        probe = probe.to(x.device)
                 f = dictionary.encode(x)
                 f = f.to(dtype=next(dictionary.parameters()).dtype)
                 x_hat = dictionary.decode(f)
