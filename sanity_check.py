@@ -90,12 +90,14 @@ def load_concept_feature_indices(features_dir, concept_key, concept_value, k):
     with open(feature_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if "top_1_percent" in data:
-        top_features = [feature for feature, _ in data["top_1_percent"]]
+        top_pairs = sorted(data["top_1_percent"], key=lambda x: x[1], reverse=True)
+        top_features = [feature for feature, _ in top_pairs]
     elif len(data) == 1:
         entry = next(iter(data.values()))
         if "top_1_percent" not in entry:
             raise KeyError(f"Missing top_1_percent in {feature_path}")
-        top_features = [feature for feature, _ in entry["top_1_percent"]]
+        top_pairs = sorted(entry["top_1_percent"], key=lambda x: x[1], reverse=True)
+        top_features = [feature for feature, _ in top_pairs]
     else:
         raise KeyError(f"Unexpected feature file format: {feature_path}")
     if not top_features:

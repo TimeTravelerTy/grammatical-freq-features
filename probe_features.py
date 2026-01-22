@@ -494,7 +494,12 @@ def attribution_patching_loop_lingualens(dataset, model, submodule, autoencoder,
 
 def select_top_bottom_features(effects):
     """Select top 1% and bottom 1% features based on attribution effects."""
-    feature_acts = torch.sum(effects.act, dim=0)
+    feature_acts = effects.act
+    if feature_acts is None:
+        raise ValueError("Missing effect activations for feature selection.")
+    if feature_acts.dim() > 1:
+        reduce_dims = tuple(range(feature_acts.dim() - 1))
+        feature_acts = feature_acts.sum(dim=reduce_dims)
     total_features = feature_acts.numel()
     num_features_to_select = max(1, int(0.01 * total_features))
     
