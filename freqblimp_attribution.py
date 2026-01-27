@@ -206,19 +206,25 @@ def sentence_nll(logits, input_ids, attention_mask):
     return loss.sum()
 
 
-def forward_with_features(wrapper, tokenizer, sentence, device, require_grad):
+def forward_with_features(wrapper, tokenizer, sentence, device, require_grad, encoded=None):
     wrapper.clear_intermediates()
-    encoded = tokenizer(sentence, return_tensors="pt", padding=False)
-    input_ids = encoded["input_ids"].to(device)
-    attention_mask = encoded.get("attention_mask")
-    if attention_mask is not None:
-        attention_mask = attention_mask.to(device)
+    if encoded is None:
+        encoded = tokenizer(sentence, return_tensors="pt", padding=False)
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+    else:
+        input_ids = torch.tensor([encoded["input_ids"]], device=device, dtype=torch.long)
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = torch.tensor([attention_mask], device=device, dtype=torch.long)
     if require_grad:
         outputs = wrapper.transformer(
             input_ids=input_ids, attention_mask=attention_mask, use_cache=False
         )
     else:
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = wrapper.transformer(
                 input_ids=input_ids, attention_mask=attention_mask, use_cache=False
             )
@@ -228,29 +234,6 @@ def forward_with_features(wrapper, tokenizer, sentence, device, require_grad):
     return outputs.logits, input_ids, attention_mask, feats
 
 
-def collect_active_features(wrapper, tokenizer, examples, device, min_count, topk, include_special):
-    counts = Counter()
-    special_ids = set(tokenizer.all_special_ids)
-    for ex in examples:
-        for key in ("good", "bad"):
-            sentence = ex[key]
-            _, input_ids, _, feats = forward_with_features(
-                wrapper, tokenizer, sentence, device, require_grad=False
-            )
-            token_ids = input_ids[0].tolist()
-            idx = feats.sparse_feature_indices.detach().cpu()
-            if not include_special and special_ids:
-                mask = torch.tensor([tid in special_ids for tid in token_ids], dtype=torch.bool)
-                if mask.any():
-                    idx = idx.clone()
-                    idx[mask] = -1
-            flat = idx.view(-1).tolist()
-            counts.update(i for i in flat if i >= 0)
-    if min_count > 0:
-        counts = Counter({k: v for k, v in counts.items() if v >= min_count})
-    if topk is not None and topk > 0 and len(counts) > topk:
-        counts = Counter(dict(counts.most_common(topk)))
-    return counts
 
 
 def make_pos_mask(good_ids, bad_ids, special_ids, include_special):
@@ -271,21 +254,22 @@ def score_pair(
     tokenizer,
     example,
     device,
-    active_set,
     include_special,
 ):
     good_sentence = example["good"]
     bad_sentence = example["bad"]
+    good_encoded = example.get("_tokens", {}).get("good") if "_tokens" in example else None
+    bad_encoded = example.get("_tokens", {}).get("bad") if "_tokens" in example else None
 
     logits_good, input_ids_good, attn_good, feats_good = forward_with_features(
-        wrapper, tokenizer, good_sentence, device, require_grad=True
+        wrapper, tokenizer, good_sentence, device, require_grad=True, encoded=good_encoded
     )
     good_acts = feats_good.sparse_feature_activations
     good_acts.retain_grad()
     nll_good = sentence_nll(logits_good, input_ids_good, attn_good)
 
     logits_bad, input_ids_bad, attn_bad, feats_bad = forward_with_features(
-        wrapper, tokenizer, bad_sentence, device, require_grad=False
+        wrapper, tokenizer, bad_sentence, device, require_grad=False, encoded=bad_encoded
     )
     nll_bad = sentence_nll(logits_bad, input_ids_bad, attn_bad).detach()
 
@@ -310,6 +294,7 @@ def score_pair(
 
     scores = defaultdict(float)
     features_seen = set()
+    activation_counts = Counter()
     for t in range(min_len):
         if not pos_mask[t]:
             continue
@@ -320,16 +305,24 @@ def score_pair(
         b_act = bad_act[t].tolist()
         b_map = {idx: act for idx, act in zip(b_idx, b_act)}
         for feat, act, grad in zip(g_idx, g_act, g_grad):
-            if active_set is not None and feat not in active_set:
-                continue
             diff = b_map.get(feat, 0.0) - act
             scores[feat] += diff * grad
             features_seen.add(feat)
+            activation_counts[feat] += 1
+        for feat in b_idx:
+            activation_counts[feat] += 1
 
-    return scores, features_seen, nll_good.detach().item(), nll_bad.item(), delta.detach().item()
+    return (
+        scores,
+        features_seen,
+        activation_counts,
+        nll_good.detach().item(),
+        nll_bad.item(),
+        delta.detach().item(),
+    )
 
 
-def build_group_topk(score_sums, feature_counts, group_size, active_counts, topk):
+def build_group_topk(score_sums, feature_counts, group_size, activation_counts, topk):
     results = []
     if group_size <= 0:
         return results
@@ -342,7 +335,7 @@ def build_group_topk(score_sums, feature_counts, group_size, active_counts, topk
                 "feature": feat,
                 "mean_score": mean_score,
                 "mean_score_active": mean_active,
-                "activation_count": active_counts.get(feat, 0),
+                "activation_count": activation_counts.get(feat, 0),
                 "example_count": count,
             }
         )
@@ -396,16 +389,9 @@ def main():
         help="SAE dtype string (e.g., float32).",
     )
     parser.add_argument(
-        "--active_topk",
-        type=int,
-        default=0,
-        help="Keep top-N most active features before attribution ranking (0 disables).",
-    )
-    parser.add_argument(
-        "--min_active_count",
-        type=int,
-        default=3,
-        help="Drop features with activation count below this threshold.",
+        "--cache_tokens",
+        action="store_true",
+        help="Pre-tokenize examples to reduce tokenizer overhead.",
     )
     parser.add_argument(
         "--include_special_tokens",
@@ -456,42 +442,52 @@ def main():
     if not HF_TOKEN:
         print("WARNING: HF_TOKEN is empty; gated models may fail to load.")
 
+    if args.cache_tokens:
+        print("Caching tokenization...")
+        start_cache = time.time()
+        for i, ex in enumerate(examples, start=1):
+            cached = {}
+            for key in ("good", "bad"):
+                enc = tokenizer(ex[key], padding=False, return_attention_mask=True)
+                cached[key] = {
+                    "input_ids": enc["input_ids"],
+                    "attention_mask": enc.get("attention_mask"),
+                }
+            ex["_tokens"] = cached
+            if args.log_every and i % args.log_every == 0:
+                elapsed = time.time() - start_cache
+                rate = i / max(elapsed, 1e-6)
+                remaining = max(len(examples) - i, 0)
+                eta = remaining / max(rate, 1e-6)
+                print(f"[cache] {i}/{len(examples)} examples ({rate:.2f} ex/s, ETA {eta/60:.1f}m)")
+        elapsed = time.time() - start_cache
+        print(f"[cache] done in {elapsed/60:.1f}m")
+
     for layer in layers:
         sae_path = args.sae_path_template.format(layer=layer)
         print(f"\n[Layer {layer}] Loading SAE: {sae_path}")
         wrapper = build_wrapper(base_model, sae_path, device, args.sae_dtype)
 
-        print("[Layer {0}] Pre-filtering active features...".format(layer))
-        active_counts = collect_active_features(
-            wrapper,
-            tokenizer,
-            examples,
-            device,
-            args.min_active_count,
-            args.active_topk,
-            args.include_special_tokens,
-        )
-        active_set = set(active_counts.keys())
-        print(f"[Layer {layer}] Active features: {len(active_set)}")
-
         score_sums = defaultdict(float)
         feature_example_counts = Counter()
+        activation_counts = Counter()
         phenomenon_score_sums = defaultdict(lambda: defaultdict(float))
         phenomenon_feature_counts = defaultdict(Counter)
+        phenomenon_activation_counts = defaultdict(Counter)
         regime_score_sums = defaultdict(lambda: defaultdict(float))
         regime_feature_counts = defaultdict(Counter)
+        regime_activation_counts = defaultdict(Counter)
         total_nll_good = 0.0
         total_nll_bad = 0.0
         total_delta = 0.0
         start = time.time()
 
         for i, ex in enumerate(examples, start=1):
-            scores, features_seen, nll_good, nll_bad, delta = score_pair(
+            scores, features_seen, activation_counts_pair, nll_good, nll_bad, delta = score_pair(
                 wrapper,
                 tokenizer,
                 ex,
                 device,
-                active_set,
                 args.include_special_tokens,
             )
             for feat, val in scores.items():
@@ -505,20 +501,25 @@ def main():
                 feature_example_counts[feat] += 1
                 phenomenon_feature_counts[phenomenon][feat] += 1
                 regime_feature_counts[regime][feat] += 1
+            activation_counts.update(activation_counts_pair)
+            phenomenon_activation_counts[phenomenon].update(activation_counts_pair)
+            regime_activation_counts[regime].update(activation_counts_pair)
             total_nll_good += nll_good
             total_nll_bad += nll_bad
             total_delta += delta
             if args.log_every and i % args.log_every == 0:
                 elapsed = time.time() - start
+                rate = i / max(elapsed, 1e-6)
+                remaining = max(len(examples) - i, 0)
+                eta = remaining / max(rate, 1e-6)
                 print(
                     f"[Layer {layer}] {i}/{len(examples)} examples "
-                    f"(+{elapsed:.1f}s, avg delta {total_delta / i:.4f})"
+                    f"({rate:.2f} ex/s, ETA {eta/60:.1f}m, avg delta {total_delta / i:.4f})"
                 )
 
         num_examples = len(examples)
         results = []
-        for feat in active_set:
-            total = score_sums.get(feat, 0.0)
+        for feat, total in score_sums.items():
             mean_score = total / num_examples
             mean_active = total / feature_example_counts[feat] if feature_example_counts[feat] else 0.0
             results.append(
@@ -526,7 +527,7 @@ def main():
                     "feature": feat,
                     "mean_score": mean_score,
                     "mean_score_active": mean_active,
-                    "activation_count": active_counts.get(feat, 0),
+                    "activation_count": activation_counts.get(feat, 0),
                     "example_count": feature_example_counts.get(feat, 0),
                 }
             )
@@ -539,7 +540,7 @@ def main():
                     sums,
                     phenomenon_feature_counts[phenomenon],
                     phenomenon_counts.get(phenomenon, 0),
-                    active_counts,
+                    phenomenon_activation_counts[phenomenon],
                     args.phenomenon_topk,
                 )
 
@@ -550,7 +551,7 @@ def main():
                     sums,
                     regime_feature_counts[regime],
                     regime_counts.get(regime, 0),
-                    active_counts,
+                    regime_activation_counts[regime],
                     args.regime_topk,
                 )
 
@@ -566,9 +567,6 @@ def main():
             "avg_nll_good": total_nll_good / num_examples,
             "avg_nll_bad": total_nll_bad / num_examples,
             "avg_delta": total_delta / num_examples,
-            "active_features": len(active_set),
-            "active_topk": args.active_topk,
-            "min_active_count": args.min_active_count,
             "phenomenon_topk": args.phenomenon_topk,
             "regime_topk": args.regime_topk,
         }
