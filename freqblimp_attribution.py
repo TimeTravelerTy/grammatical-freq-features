@@ -152,8 +152,8 @@ def build_base_model_and_tokenizer(model_name, device, dtype):
     return model, tokenizer
 
 
-def build_wrapper(base_model, sae_path, device, dtype):
-    sae_kwargs = {"torch_dtype": dtype}
+def build_wrapper(base_model, sae_path, device, sae_dtype):
+    sae_kwargs = {"dtype": sae_dtype}
     if HF_TOKEN:
         sae_kwargs["token"] = HF_TOKEN
     sae = OpenSae.from_pretrained(sae_path, **sae_kwargs)
@@ -374,6 +374,12 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dtype", type=str, default="float16")
     parser.add_argument(
+        "--sae_dtype",
+        type=str,
+        default="float32",
+        help="SAE dtype string (e.g., float32).",
+    )
+    parser.add_argument(
         "--active_topk",
         type=int,
         default=0,
@@ -437,7 +443,7 @@ def main():
     for layer in layers:
         sae_path = args.sae_path_template.format(layer=layer)
         print(f"\n[Layer {layer}] Loading SAE: {sae_path}")
-        wrapper = build_wrapper(base_model, sae_path, device, dtype)
+        wrapper = build_wrapper(base_model, sae_path, device, args.sae_dtype)
 
         print("[Layer {0}] Pre-filtering active features...".format(layer))
         active_counts = collect_active_features(
@@ -536,6 +542,8 @@ def main():
             "layer": layer,
             "sae_path": sae_path,
             "model_name": args.model_name,
+            "model_dtype": str(dtype).replace("torch.", ""),
+            "sae_dtype": args.sae_dtype,
             "num_examples": num_examples,
             "regime_counts": dict(regime_counts),
             "phenomenon_counts": dict(phenomenon_counts),
