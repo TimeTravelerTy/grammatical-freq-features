@@ -165,6 +165,8 @@ def build_base_model_and_tokenizer(model_name, device, dtype):
     if device:
         model.to(device)
     model.config.use_cache = False
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
     return model, tokenizer
 
 
