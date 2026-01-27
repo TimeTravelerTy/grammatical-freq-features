@@ -313,6 +313,29 @@ def score_pair(
     return scores, features_seen, nll_good.detach().item(), nll_bad.item(), delta.detach().item()
 
 
+def build_group_topk(score_sums, feature_counts, group_size, active_counts, topk):
+    results = []
+    if group_size <= 0:
+        return results
+    for feat, total in score_sums.items():
+        mean_score = total / group_size
+        count = feature_counts.get(feat, 0)
+        mean_active = total / count if count else 0.0
+        results.append(
+            {
+                "feature": feat,
+                "mean_score": mean_score,
+                "mean_score_active": mean_active,
+                "activation_count": active_counts.get(feat, 0),
+                "example_count": count,
+            }
+        )
+    results.sort(key=lambda x: abs(x["mean_score"]), reverse=True)
+    if topk and topk > 0:
+        return results[:topk]
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Attribution patching on OpenSAE latents for freqBLiMP rare pairs."
@@ -353,13 +376,13 @@ def main():
     parser.add_argument(
         "--active_topk",
         type=int,
-        default=5000,
-        help="Keep top-N most active features before attribution ranking.",
+        default=0,
+        help="Keep top-N most active features before attribution ranking (0 disables).",
     )
     parser.add_argument(
         "--min_active_count",
         type=int,
-        default=0,
+        default=3,
         help="Drop features with activation count below this threshold.",
     )
     parser.add_argument(
@@ -372,6 +395,18 @@ def main():
         type=str,
         default="outputs/attribution",
         help="Directory to save results.",
+    )
+    parser.add_argument(
+        "--phenomenon_topk",
+        type=int,
+        default=200,
+        help="Top-K features to keep per phenomenon (0 disables).",
+    )
+    parser.add_argument(
+        "--regime_topk",
+        type=int,
+        default=200,
+        help="Top-K features to keep per frequency regime (0 disables).",
     )
     parser.add_argument("--log_every", type=int, default=50)
     args = parser.parse_args()
@@ -419,6 +454,10 @@ def main():
 
         score_sums = defaultdict(float)
         feature_example_counts = Counter()
+        phenomenon_score_sums = defaultdict(lambda: defaultdict(float))
+        phenomenon_feature_counts = defaultdict(Counter)
+        regime_score_sums = defaultdict(lambda: defaultdict(float))
+        regime_feature_counts = defaultdict(Counter)
         total_nll_good = 0.0
         total_nll_bad = 0.0
         total_delta = 0.0
@@ -435,8 +474,15 @@ def main():
             )
             for feat, val in scores.items():
                 score_sums[feat] += val
+            phenomenon = ex.get("phenomenon") or "unknown"
+            regime = ex.get("regime") or "unknown"
+            for feat, val in scores.items():
+                phenomenon_score_sums[phenomenon][feat] += val
+                regime_score_sums[regime][feat] += val
             for feat in features_seen:
                 feature_example_counts[feat] += 1
+                phenomenon_feature_counts[phenomenon][feat] += 1
+                regime_feature_counts[regime][feat] += 1
             total_nll_good += nll_good
             total_nll_bad += nll_bad
             total_delta += delta
@@ -464,6 +510,28 @@ def main():
             )
         results.sort(key=lambda x: abs(x["mean_score"]), reverse=True)
 
+        phenomenon_topk = {}
+        if args.phenomenon_topk and args.phenomenon_topk > 0:
+            for phenomenon, sums in phenomenon_score_sums.items():
+                phenomenon_topk[phenomenon] = build_group_topk(
+                    sums,
+                    phenomenon_feature_counts[phenomenon],
+                    phenomenon_counts.get(phenomenon, 0),
+                    active_counts,
+                    args.phenomenon_topk,
+                )
+
+        regime_topk = {}
+        if args.regime_topk and args.regime_topk > 0:
+            for regime, sums in regime_score_sums.items():
+                regime_topk[regime] = build_group_topk(
+                    sums,
+                    regime_feature_counts[regime],
+                    regime_counts.get(regime, 0),
+                    active_counts,
+                    args.regime_topk,
+                )
+
         summary = {
             "layer": layer,
             "sae_path": sae_path,
@@ -477,11 +545,22 @@ def main():
             "active_features": len(active_set),
             "active_topk": args.active_topk,
             "min_active_count": args.min_active_count,
+            "phenomenon_topk": args.phenomenon_topk,
+            "regime_topk": args.regime_topk,
         }
 
         out_path = os.path.join(args.output_dir, f"freqblimp_rare_attribution_layer{layer:02d}.json")
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({"summary": summary, "features": results}, f, indent=2)
+            json.dump(
+                {
+                    "summary": summary,
+                    "features": results,
+                    "phenomenon_features": phenomenon_topk,
+                    "regime_features": regime_topk,
+                },
+                f,
+                indent=2,
+            )
         print(f"[Layer {layer}] Wrote results to {out_path}")
         remove_hooks(wrapper)
         del wrapper
