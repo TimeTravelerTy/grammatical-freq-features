@@ -25,10 +25,26 @@ _ensure_opensae_on_path()
 try:
     from opensae import OpenSae, TransformerWithSae
     from opensae.sae_utils import torch_decode
+    from opensae import config_utils as _opensae_config_utils
 except Exception as exc:
     raise RuntimeError(
         "Failed to import OpenSAE. Ensure OpenSAE is available in ./OpenSAE/src or installed."
     ) from exc
+
+
+def _patch_opensae_dtype():
+    # Patch OpenSAE dtype handling to avoid UnboundLocalError without modifying vendor code.
+    def _fixed_get_torch_dtype(self):
+        if isinstance(self.torch_dtype, torch.dtype):
+            return self.torch_dtype
+        dtype = getattr(torch, self.torch_dtype)
+        assert isinstance(dtype, torch.dtype)
+        return dtype
+
+    _opensae_config_utils.PretrainedSaeConfig.get_torch_dtype = _fixed_get_torch_dtype
+
+
+_patch_opensae_dtype()
 
 
 DEFAULT_FILES = {
