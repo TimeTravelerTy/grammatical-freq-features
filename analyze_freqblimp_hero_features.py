@@ -7,6 +7,7 @@ import os
 import random
 from collections import Counter, defaultdict
 import heapq
+import itertools
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -357,12 +358,16 @@ def _select_frequency_sensitive(
     return selected
 
 
+_heap_counter = itertools.count()
+
+
 def _update_heap(heap, entry, k):
+    key = (entry["activation_value"], next(_heap_counter))
     if len(heap) < k:
-        heapq.heappush(heap, (entry["activation_value"], entry))
+        heapq.heappush(heap, (key, entry))
         return
-    if entry["activation_value"] > heap[0][0]:
-        heapq.heapreplace(heap, (entry["activation_value"], entry))
+    if entry["activation_value"] > heap[0][0][0]:
+        heapq.heapreplace(heap, (key, entry))
 
 
 def main():
@@ -715,7 +720,7 @@ def main():
             }
             for regime in regimes:
                 heap = heaps[fid][regime]
-                sorted_entries = [e for _, e in sorted(heap, key=lambda x: x[0], reverse=True)]
+                sorted_entries = [e for _, e in sorted(heap, key=lambda x: x[0][0], reverse=True)]
                 payload["contexts"][regime] = sorted_entries
             out_path = os.path.join(contexts_dir, f"layer{layer:02d}_feature{fid}.json")
             with open(out_path, "w", encoding="utf-8") as f:
