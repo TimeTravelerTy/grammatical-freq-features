@@ -672,6 +672,10 @@ def main():
 
                 max_by_feature = {}
                 for t, (t_idxs, t_acts) in enumerate(zip(idxs_list, acts_list)):
+                    if not isinstance(t_idxs, (list, tuple)):
+                        t_idxs = [t_idxs]
+                    if not isinstance(t_acts, (list, tuple)):
+                        t_acts = [t_acts]
                     for fid, act in zip(t_idxs, t_acts):
                         if fid not in selected_set:
                             continue
