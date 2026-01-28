@@ -218,6 +218,42 @@ def forward_with_features(wrapper, tokenizer, sentence, device, encoded=None):
     return outputs.logits, input_ids, attention_mask, feats
 
 
+def forward_with_features_batch(wrapper, tokenizer, batch_items, device):
+    wrapper.clear_intermediates()
+    all_encoded = all(item.get("encoded") is not None for item in batch_items)
+    if all_encoded:
+        max_len = max(len(item["encoded"]["input_ids"]) for item in batch_items)
+        pad_id = tokenizer.pad_token_id
+        input_ids = torch.full((len(batch_items), max_len), pad_id, device=device, dtype=torch.long)
+        attention_mask = torch.zeros((len(batch_items), max_len), device=device, dtype=torch.long)
+        for i, item in enumerate(batch_items):
+            ids = item["encoded"]["input_ids"]
+            mask = item["encoded"].get("attention_mask")
+            input_ids[i, : len(ids)] = torch.tensor(ids, device=device, dtype=torch.long)
+            if mask is not None:
+                attention_mask[i, : len(mask)] = torch.tensor(mask, device=device, dtype=torch.long)
+            else:
+                attention_mask[i, : len(ids)] = 1
+    else:
+        encoded = tokenizer(
+            [item["sentence"] for item in batch_items],
+            return_tensors="pt",
+            padding=True,
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+    with torch.inference_mode():
+        outputs = wrapper.transformer(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=False
+        )
+    feats = wrapper.saved_features
+    if feats is None:
+        raise RuntimeError("No SAE features captured; check hookpoints/config.")
+    return input_ids, attention_mask, feats
+
+
 def _read_csv(path):
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -357,6 +393,12 @@ def main():
         type=int,
         default=20,
         help="Top contexts to keep per feature per regime.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size for context scanning.",
     )
     parser.add_argument(
         "--sentence_field",
@@ -588,28 +630,48 @@ def main():
 
         fields = ["good", "bad"] if args.sentence_field == "both" else [args.sentence_field]
 
-        for i, ex in enumerate(examples, start=1):
+        items = []
+        for ex in examples:
             regime = ex["regime"]
             if regime not in regimes:
                 continue
-            phenomenon = ex.get("phenomenon")
-            ex_id = ex.get("idx")
             for field in fields:
-                sentence = ex[field]
                 encoded = None
                 if "_tokens" in ex:
                     encoded = ex["_tokens"].get(field)
-                _, input_ids, _, feats = forward_with_features(
-                    wrapper, tokenizer, sentence, device, encoded=encoded
+                items.append(
+                    {
+                        "regime": regime,
+                        "phenomenon": ex.get("phenomenon"),
+                        "example_id": ex.get("idx"),
+                        "sentence": ex[field],
+                        "encoded": encoded,
+                        "sentence_field": field,
+                    }
                 )
 
-                idxs = feats.sparse_feature_indices.detach().cpu().tolist()
-                acts = feats.sparse_feature_activations.detach().cpu().tolist()
-                token_ids = input_ids[0].detach().cpu().tolist()
+        for i in range(0, len(items), args.batch_size):
+            batch = items[i : i + args.batch_size]
+            input_ids, attention_mask, feats = forward_with_features_batch(
+                wrapper, tokenizer, batch, device
+            )
+            idxs = feats.sparse_feature_indices.detach().cpu()
+            acts = feats.sparse_feature_activations.detach().cpu()
+            input_ids = input_ids.detach().cpu()
+            attn = attention_mask.detach().cpu() if attention_mask is not None else None
+
+            for b, item in enumerate(batch):
+                if attn is not None:
+                    seq_len = int(attn[b].sum().item())
+                else:
+                    seq_len = input_ids.shape[1]
+                token_ids = input_ids[b, :seq_len].tolist()
                 tokens = tokenizer.convert_ids_to_tokens(token_ids)
+                idxs_list = idxs[b, :seq_len].tolist()
+                acts_list = acts[b, :seq_len].tolist()
 
                 max_by_feature = {}
-                for t, (t_idxs, t_acts) in enumerate(zip(idxs, acts)):
+                for t, (t_idxs, t_acts) in enumerate(zip(idxs_list, acts_list)):
                     for fid, act in zip(t_idxs, t_acts):
                         if fid not in selected_set:
                             continue
@@ -625,20 +687,20 @@ def main():
                     window_ids = token_ids[start:end]
                     window_text = tokenizer.decode(window_ids, clean_up_tokenization_spaces=True)
                     entry = {
-                        "example_id": ex_id,
-                        "phenomenon": phenomenon,
-                        "regime": regime,
-                        "sentence_field": field,
-                        "sentence": sentence,
+                        "example_id": item["example_id"],
+                        "phenomenon": item["phenomenon"],
+                        "regime": item["regime"],
+                        "sentence_field": item["sentence_field"],
+                        "sentence": item["sentence"],
                         "token_index": t,
                         "token_str": tokens[t],
                         "activation_value": act,
                         "window_text": window_text,
                     }
-                    _update_heap(heaps[fid][regime], entry, args.context_topk)
+                    _update_heap(heaps[fid][item["regime"]], entry, args.context_topk)
 
-            if args.log_every and i % args.log_every == 0:
-                print(f"  processed {i}/{len(examples)}")
+            if args.log_every and (i // args.batch_size + 1) % args.log_every == 0:
+                print(f"  processed {min(i + args.batch_size, len(items))}/{len(items)}")
 
         # Save contexts per feature
         for fid in selected_set:
