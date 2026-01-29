@@ -600,6 +600,7 @@ def main():
     os.makedirs(contexts_dir, exist_ok=True)
 
     hero_rows = []
+    logit_rows = []
 
     for layer in layers:
         attrib_path = os.path.join(
@@ -753,6 +754,14 @@ def main():
                 if info:
                     row["logit_lens_top_tokens"] = ",".join(info["tokens"])
                     row["logit_lens_top_scores"] = ",".join([f"{s:.4f}" for s in info["scores"]])
+                    logit_rows.append(
+                        {
+                            "feature_id": fid,
+                            "layer": layer,
+                            "top_tokens": row["logit_lens_top_tokens"],
+                            "top_scores": row["logit_lens_top_scores"],
+                        }
+                    )
 
         if args.skip_contexts:
             if wrapper is not None:
@@ -924,6 +933,14 @@ def main():
         writer.writeheader()
         for row in hero_rows:
             writer.writerow(row)
+
+    if logit_rows:
+        out_logit = os.path.join(args.output_dir, "logit_lens.csv")
+        with open(out_logit, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["feature_id", "layer", "top_tokens", "top_scores"])
+            writer.writeheader()
+            for row in logit_rows:
+                writer.writerow(row)
 
     print(f"Wrote hero feature summary to {out_csv}")
 
