@@ -196,7 +196,7 @@ def remove_hooks(wrapper):
         handle.remove()
 
 
-def forward_with_features(wrapper, tokenizer, sentence, device, encoded=None):
+def forward_with_features(wrapper, tokenizer, sentence, device, require_grad=False, encoded=None):
     wrapper.clear_intermediates()
     if encoded is None:
         encoded = tokenizer(sentence, return_tensors="pt", padding=False)
@@ -209,10 +209,15 @@ def forward_with_features(wrapper, tokenizer, sentence, device, encoded=None):
         attention_mask = encoded.get("attention_mask")
         if attention_mask is not None:
             attention_mask = torch.tensor([attention_mask], device=device, dtype=torch.long)
-    with torch.inference_mode():
+    if require_grad:
         outputs = wrapper.transformer(
             input_ids=input_ids, attention_mask=attention_mask, use_cache=False
         )
+    else:
+        with torch.inference_mode():
+            outputs = wrapper.transformer(
+                input_ids=input_ids, attention_mask=attention_mask, use_cache=False
+            )
     feats = wrapper.saved_features
     if feats is None:
         raise RuntimeError("No SAE features captured; check hookpoints/config.")
@@ -276,8 +281,46 @@ def _top_phenomena_from_profile(cluster_profile_row):
 def _parse_layers(value):
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
+def _build_feature_phenomenon_scores(phenomenon_features):
+    feat_scores = defaultdict(dict)
+    for phen, feats in phenomenon_features.items():
+        for feat in feats:
+            fid = feat.get("feature")
+            if fid is None:
+                continue
+            feat_scores[int(fid)][phen] = feat.get("mean_score", 0.0)
+    return feat_scores
 
-def _select_specialists(cluster_rows, cluster_stats, min_abs_mean_score):
+
+def _specialist_score(phen_scores):
+    if not phen_scores:
+        return 0.0, 0.0
+    vals = list(phen_scores.values())
+    max_pos = max(vals)
+    min_neg = min(vals)
+    if max_pos > 0:
+        return max_pos, max_pos
+    return min_neg, abs(min_neg)
+
+
+def _significant_phenomena(phen_scores, ref_value, sig_frac):
+    if not phen_scores or ref_value == 0:
+        return []
+    thresh = abs(ref_value) * sig_frac
+    if ref_value > 0:
+        hits = [k for k, v in phen_scores.items() if v >= thresh]
+        if hits:
+            return hits
+        best = max(phen_scores.items(), key=lambda x: x[1])
+        return [best[0]]
+    hits = [k for k, v in phen_scores.items() if v <= -thresh]
+    if hits:
+        return hits
+    best = min(phen_scores.items(), key=lambda x: x[1])
+    return [best[0]]
+
+
+def _select_specialists(cluster_rows, cluster_stats, min_abs_mean_score, per_cluster=4):
     clusters_sorted = sorted(
         cluster_stats.items(), key=lambda x: (x[1]["mean_entropy"], -x[1]["size"])
     )
@@ -290,84 +333,113 @@ def _select_specialists(cluster_rows, cluster_stats, min_abs_mean_score):
             for r in feats
             if r["activation_any_rate"] <= 0.99 and abs(r["mean_score"]) >= min_abs_mean_score
         ]
-        feats.sort(key=lambda r: r["entropy_positive"])
-        selected.extend(feats[:4])
-    return selected
-
-
-def _select_generalists(cluster_rows, cluster_stats, min_abs_mean_score, target=5):
-    clusters_sorted = sorted(
-        cluster_stats.items(), key=lambda x: x[1]["mean_entropy"], reverse=True
-    )
-    selected = []
-    for cid, _ in clusters_sorted:
-        feats = [r for r in cluster_rows if r["cluster"] == cid]
-        feats = [
-            r
-            for r in feats
-            if r["activation_any_rate"] <= 0.99 and abs(r["mean_score"]) >= min_abs_mean_score
-        ]
-        feats.sort(key=lambda r: r["mean_score"], reverse=True)
-        for r in feats:
-            selected.append(r)
-            if len(selected) >= target:
-                return selected
-    return selected
-
-
-def _select_frequency_sensitive(
-    feature_lookup,
-    head_map,
-    xtail_map,
-    min_abs_mean_score,
-    target=5,
-):
-    candidates = []
-    for fid, info in feature_lookup.items():
-        if info["activation_any_rate"] > 0.99:
-            continue
-        mean_score = info["mean_score"]
-        if abs(mean_score) < min_abs_mean_score:
-            continue
-        head = head_map.get(fid, 0.0)
-        xtail = xtail_map.get(fid, 0.0)
-        diff = head - xtail
-        candidates.append((fid, diff, abs(diff)))
-
-    if not candidates:
-        return []
-
-    pos = sorted([c for c in candidates if c[1] > 0], key=lambda x: x[2], reverse=True)
-    neg = sorted([c for c in candidates if c[1] < 0], key=lambda x: x[2], reverse=True)
-
-    selected = []
-    want_pos = math.ceil(target / 2)
-    want_neg = target - want_pos
-    for fid, diff, _ in pos[:want_pos]:
-        selected.append((fid, diff))
-    for fid, diff, _ in neg[:want_neg]:
-        selected.append((fid, diff))
-
-    if len(selected) < target:
-        remaining = [c for c in candidates if (c[0], c[1]) not in selected]
-        remaining.sort(key=lambda x: x[2], reverse=True)
-        for fid, diff, _ in remaining:
-            if len(selected) >= target:
-                break
-            selected.append((fid, diff))
+        feats = [r for r in feats if abs(r.get("specialist_score", 0.0)) >= min_abs_mean_score]
+        feats.sort(key=lambda r: r["specialist_score"], reverse=True)
+        selected.extend(feats[:per_cluster])
     return selected
 
 
 _heap_counter = itertools.count()
 
 
-def _update_heap(heap, entry, k):
-    key = (entry["activation_value"], next(_heap_counter))
+def _update_heap(heap, entry, k, score):
+    key = (score, next(_heap_counter))
     if len(heap) < k:
         heapq.heappush(heap, (key, entry))
         return
-    if entry["activation_value"] > heap[0][0][0]:
+    if score > heap[0][0][0]:
         heapq.heapreplace(heap, (key, entry))
+
+
+def sentence_nll(logits, input_ids, attention_mask):
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = input_ids[:, 1:].contiguous()
+    loss = torch.nn.functional.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        reduction="none",
+    )
+    if attention_mask is not None:
+        shift_mask = attention_mask[:, 1:].contiguous().view(-1)
+        loss = loss * shift_mask
+    return loss.sum()
+
+
+def make_pos_mask(good_ids, bad_ids, special_ids, include_special):
+    min_len = min(len(good_ids), len(bad_ids))
+    if include_special or not special_ids:
+        return [True] * min_len
+    mask = []
+    for i in range(min_len):
+        if good_ids[i] in special_ids or bad_ids[i] in special_ids:
+            mask.append(False)
+        else:
+            mask.append(True)
+    return mask
+
+
+def _max_contribution_for_example(wrapper, tokenizer, example, device, selected_set, include_special):
+    good_sentence = example["good"]
+    bad_sentence = example["bad"]
+    good_encoded = example.get("_tokens", {}).get("good") if "_tokens" in example else None
+    bad_encoded = example.get("_tokens", {}).get("bad") if "_tokens" in example else None
+
+    logits_good, input_ids_good, attn_good, feats_good = forward_with_features(
+        wrapper, tokenizer, good_sentence, device, require_grad=True, encoded=good_encoded
+    )
+    good_acts = feats_good.sparse_feature_activations
+    good_acts.retain_grad()
+    nll_good = sentence_nll(logits_good, input_ids_good, attn_good)
+
+    logits_bad, input_ids_bad, attn_bad, feats_bad = forward_with_features(
+        wrapper, tokenizer, bad_sentence, device, require_grad=False, encoded=bad_encoded
+    )
+    nll_bad = sentence_nll(logits_bad, input_ids_bad, attn_bad).detach()
+
+    delta = nll_bad - nll_good
+    wrapper.transformer.zero_grad(set_to_none=True)
+    wrapper.sae.zero_grad(set_to_none=True)
+    delta.backward()
+
+    if good_acts.grad is None:
+        raise RuntimeError("No gradients for SAE activations; check decoder_impl and hookpoints.")
+
+    good_idx = feats_good.sparse_feature_indices.detach().cpu()
+    good_act = good_acts.detach().cpu()
+    good_grad = good_acts.grad.detach().cpu()
+    bad_idx = feats_bad.sparse_feature_indices.detach().cpu()
+    bad_act = feats_bad.sparse_feature_activations.detach().cpu()
+
+    good_ids = input_ids_good[0].tolist()
+    bad_ids = input_ids_bad[0].tolist()
+    special_ids = set(tokenizer.all_special_ids)
+    pos_mask = make_pos_mask(good_ids, bad_ids, special_ids, include_special)
+    min_len = min(len(good_ids), len(bad_ids))
+
+    max_by_feature = {}
+    for t in range(min_len):
+        if not pos_mask[t]:
+            continue
+        if not include_special and good_ids[t] in special_ids:
+            continue
+        g_idx = good_idx[t].tolist()
+        g_act = good_act[t].tolist()
+        g_grad = good_grad[t].tolist()
+        b_idx = bad_idx[t].tolist()
+        b_act = bad_act[t].tolist()
+        b_map = {idx: act for idx, act in zip(b_idx, b_act)}
+        for fid, act, grad in zip(g_idx, g_act, g_grad):
+            if fid not in selected_set:
+                continue
+            contrib = (b_map.get(fid, 0.0) - act) * grad
+            score = abs(contrib)
+            prev = max_by_feature.get(fid)
+            if prev is None or score > prev[0]:
+                max_by_feature[fid] = (score, contrib, t, act)
+
+    token_ids = input_ids_good[0].detach().cpu().tolist()
+    tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    return max_by_feature, token_ids, tokens
 
 
 def main():
@@ -392,6 +464,36 @@ def main():
         type=float,
         default=1e-4,
         help="Minimum absolute overall mean_score to keep a feature.",
+    )
+    parser.add_argument(
+        "--specialists_per_cluster",
+        type=int,
+        default=4,
+        help="Number of specialist features to keep per low-entropy cluster.",
+    )
+    parser.add_argument(
+        "--phenomenon_sig_frac",
+        type=float,
+        default=0.2,
+        help="Fraction of max phenomenon score to consider 'significant' for display.",
+    )
+    parser.add_argument(
+        "--logit_lens_topk",
+        type=int,
+        default=10,
+        help="Number of top tokens to report for logit lens.",
+    )
+    parser.add_argument(
+        "--context_rank_by",
+        type=str,
+        default="activation",
+        choices=["activation", "contribution"],
+        help="Rank contexts by activation or attribution contribution.",
+    )
+    parser.add_argument(
+        "--include_special_tokens",
+        action="store_true",
+        help="Include special tokens when computing contribution positions.",
     )
     parser.add_argument(
         "--context_topk",
@@ -530,6 +632,9 @@ def main():
         tail_map = {int(f["feature"]): f.get("mean_score", 0.0) for f in regime_features.get("tail", [])}
         xtail_map = {int(f["feature"]): f.get("mean_score", 0.0) for f in regime_features.get("xtail", [])}
 
+        phenomenon_features = attrib.get("phenomenon_features", {})
+        feat_phen_scores = _build_feature_phenomenon_scores(phenomenon_features)
+
         cluster_path = os.path.join(
             args.phenomenon_profile_dir, f"feature_clusters_layer{layer:02d}.csv"
         )
@@ -543,13 +648,19 @@ def main():
         cluster_rows_raw = _read_csv(cluster_path)
         cluster_rows = []
         for r in cluster_rows_raw:
+            fid = int(r["feature"])
+            phen_scores = feat_phen_scores.get(fid, {})
+            spec_score, spec_ref = _specialist_score(phen_scores)
+            spec_phens = _significant_phenomena(phen_scores, spec_ref, args.phenomenon_sig_frac)
             cluster_rows.append(
                 {
-                    "feature": int(r["feature"]),
+                    "feature": fid,
                     "cluster": int(r["cluster"]),
                     "entropy_positive": float(r["entropy_positive"]),
                     "mean_score": float(r["mean_score"]),
                     "activation_any_rate": float(r["activation_any_rate"]),
+                    "specialist_score": spec_score,
+                    "specialist_phenomena": spec_phens,
                 }
             )
 
@@ -570,10 +681,11 @@ def main():
             cid = int(r["cluster"])
             cluster_top_phen[cid] = _top_phenomena_from_profile(r)
 
-        specialists = _select_specialists(cluster_rows, cluster_stats, args.min_abs_mean_score)
-        generalists = _select_generalists(cluster_rows, cluster_stats, args.min_abs_mean_score, target=5)
-        freq_sel = _select_frequency_sensitive(
-            feature_lookup, head_map, xtail_map, args.min_abs_mean_score, target=5
+        specialists = _select_specialists(
+            cluster_rows,
+            cluster_stats,
+            args.min_abs_mean_score,
+            per_cluster=args.specialists_per_cluster,
         )
 
         selected_features = {}
@@ -588,28 +700,12 @@ def main():
 
         for r in specialists:
             _add_selected(r, "specialist")
-        for r in generalists:
-            _add_selected(r, "generalist")
-        for fid, _ in freq_sel:
-            # Build a row from lookup
-            info = feature_lookup.get(fid, {"mean_score": 0.0, "activation_any_rate": 0.0})
-            # If present in cluster rows, use that to get entropy/cluster
-            match = next((r for r in cluster_rows if r["feature"] == fid), None)
-            if match is None:
-                match = {
-                    "feature": fid,
-                    "cluster": -1,
-                    "entropy_positive": 0.0,
-                    "mean_score": info["mean_score"],
-                    "activation_any_rate": info["activation_any_rate"],
-                }
-            _add_selected(match, "frequency_sensitive")
-
-        # Build CSV rows
+        # Build CSV rows (fill logit lens later if enabled)
+        layer_rows = []
         for fid, payload in selected_features.items():
             row = payload["row"]
             cluster_id = row.get("cluster", -1)
-            hero_rows.append(
+            layer_rows.append(
                 {
                     "feature_id": fid,
                     "layer": layer,
@@ -619,103 +715,177 @@ def main():
                     "mean_score_head": head_map.get(fid, 0.0),
                     "mean_score_tail": tail_map.get(fid, 0.0),
                     "mean_score_xtail": xtail_map.get(fid, 0.0),
+                    "specialist_score": row.get("specialist_score", 0.0),
+                    "specialist_phenomena": ",".join(row.get("specialist_phenomena", [])),
                     "cluster_top_phenomena": ",".join(cluster_top_phen.get(cluster_id, [])),
                     "category": ",".join(sorted(payload["categories"])),
+                    "logit_lens_top_tokens": "",
+                    "logit_lens_top_scores": "",
                 }
             )
+        hero_rows.extend(layer_rows)
 
-        if args.skip_contexts:
-            continue
-
-        print(f"[Layer {layer}] Loading SAE: {sae_path}")
-        wrapper = build_wrapper(base_model, sae_path, device, args.sae_dtype)
+        need_wrapper = (not args.skip_contexts) or (args.logit_lens_topk and args.logit_lens_topk > 0)
+        wrapper = None
+        if need_wrapper:
+            print(f"[Layer {layer}] Loading SAE: {sae_path}")
+            wrapper = build_wrapper(base_model, sae_path, device, args.sae_dtype)
 
         selected_set = set(selected_features.keys())
+
+        logit_info = {}
+        # Logit lens
+        if wrapper is not None and args.logit_lens_topk and args.logit_lens_topk > 0:
+            unembed = base_model.get_output_embeddings().weight
+            with torch.no_grad():
+                feat_list = sorted(selected_set)
+                dec = wrapper.sae.W_dec[feat_list].to(unembed.dtype)
+                logits = torch.matmul(dec, unembed.T)
+                top_vals, top_idx = torch.topk(logits, k=args.logit_lens_topk, dim=-1)
+                top_idx = top_idx.detach().cpu().tolist()
+                top_vals = top_vals.detach().cpu().tolist()
+            for i, fid in enumerate(feat_list):
+                toks = tokenizer.convert_ids_to_tokens(top_idx[i])
+                logit_info[fid] = {"tokens": toks, "scores": top_vals[i]}
+            for row in layer_rows:
+                fid = row["feature_id"]
+                info = logit_info.get(fid)
+                if info:
+                    row["logit_lens_top_tokens"] = ",".join(info["tokens"])
+                    row["logit_lens_top_scores"] = ",".join([f"{s:.4f}" for s in info["scores"]])
+
+        if args.skip_contexts:
+            if wrapper is not None:
+                remove_hooks(wrapper)
+                del wrapper
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+            continue
         heaps = {fid: {reg: [] for reg in regimes} for fid in selected_set}
 
-        fields = ["good", "bad"] if args.sentence_field == "both" else [args.sentence_field]
-
-        items = []
-        for ex in examples:
-            regime = ex["regime"]
-            if regime not in regimes:
-                continue
-            for field in fields:
-                encoded = None
-                if "_tokens" in ex:
-                    encoded = ex["_tokens"].get(field)
-                items.append(
-                    {
-                        "regime": regime,
-                        "phenomenon": ex.get("phenomenon"),
-                        "example_id": ex.get("idx"),
-                        "sentence": ex[field],
-                        "encoded": encoded,
-                        "sentence_field": field,
-                    }
+        if args.context_rank_by == "contribution":
+            if args.sentence_field != "good":
+                print("[warn] contribution ranking uses good sentences only.")
+            for i, ex in enumerate(examples, start=1):
+                regime = ex["regime"]
+                if regime not in regimes:
+                    continue
+                special_ids = set(tokenizer.all_special_ids)
+                max_by_feature, token_ids, tokens = _max_contribution_for_example(
+                    wrapper, tokenizer, ex, device, selected_set, args.include_special_tokens
                 )
-
-        for i in range(0, len(items), args.batch_size):
-            batch = items[i : i + args.batch_size]
-            input_ids, attention_mask, feats = forward_with_features_batch(
-                wrapper, tokenizer, batch, device
-            )
-            idxs = feats.sparse_feature_indices.detach().cpu()
-            acts = feats.sparse_feature_activations.detach().cpu()
-            input_ids = input_ids.detach().cpu()
-            attn = attention_mask.detach().cpu() if attention_mask is not None else None
-
-            for b, item in enumerate(batch):
-                if attn is not None:
-                    seq_len = int(attn[b].sum().item())
-                else:
-                    seq_len = input_ids.shape[1]
-                token_ids = input_ids[b, :seq_len].tolist()
-                tokens = tokenizer.convert_ids_to_tokens(token_ids)
-                idxs_list = idxs[b, :seq_len].tolist()
-                acts_list = acts[b, :seq_len].tolist()
-
-                max_by_feature = {}
-                for t, (t_idxs, t_acts) in enumerate(zip(idxs_list, acts_list)):
-                    if not isinstance(t_idxs, (list, tuple)):
-                        t_idxs = [t_idxs]
-                    if not isinstance(t_acts, (list, tuple)):
-                        t_acts = [t_acts]
-                    for fid, act in zip(t_idxs, t_acts):
-                        if fid not in selected_set:
-                            continue
-                        if act <= 0:
-                            continue
-                        prev = max_by_feature.get(fid)
-                        if prev is None or act > prev[0]:
-                            max_by_feature[fid] = (act, t)
-
-                for fid, (act, t) in max_by_feature.items():
+                for fid, (score, contrib, t, act) in max_by_feature.items():
                     start = max(0, t - 4)
                     end = min(len(tokens), t + 5)
                     window_ids = token_ids[start:end]
                     window_text = tokenizer.decode(window_ids, clean_up_tokenization_spaces=True)
                     entry = {
-                        "example_id": item["example_id"],
-                        "phenomenon": item["phenomenon"],
-                        "regime": item["regime"],
-                        "sentence_field": item["sentence_field"],
-                        "sentence": item["sentence"],
+                        "example_id": ex.get("idx"),
+                        "phenomenon": ex.get("phenomenon"),
+                        "regime": regime,
+                        "sentence_field": "good",
+                        "sentence": ex["good"],
                         "token_index": t,
                         "token_str": tokens[t],
                         "activation_value": act,
+                        "contribution_value": contrib,
+                        "score": score,
+                        "score_type": "contribution",
                         "window_text": window_text,
                     }
-                    _update_heap(heaps[fid][item["regime"]], entry, args.context_topk)
+                    _update_heap(heaps[fid][regime], entry, args.context_topk, score)
+                if args.log_every and i % args.log_every == 0:
+                    print(f"  processed {i}/{len(examples)}")
+        else:
+            fields = ["good", "bad"] if args.sentence_field == "both" else [args.sentence_field]
+            special_ids = set(tokenizer.all_special_ids)
 
-            if args.log_every and (i // args.batch_size + 1) % args.log_every == 0:
-                print(f"  processed {min(i + args.batch_size, len(items))}/{len(items)}")
+            items = []
+            for ex in examples:
+                regime = ex["regime"]
+                if regime not in regimes:
+                    continue
+                for field in fields:
+                    encoded = None
+                    if "_tokens" in ex:
+                        encoded = ex["_tokens"].get(field)
+                    items.append(
+                        {
+                            "regime": regime,
+                            "phenomenon": ex.get("phenomenon"),
+                            "example_id": ex.get("idx"),
+                            "sentence": ex[field],
+                            "encoded": encoded,
+                            "sentence_field": field,
+                        }
+                    )
+
+            for i in range(0, len(items), args.batch_size):
+                batch = items[i : i + args.batch_size]
+                input_ids, attention_mask, feats = forward_with_features_batch(
+                    wrapper, tokenizer, batch, device
+                )
+                idxs = feats.sparse_feature_indices.detach().cpu()
+                acts = feats.sparse_feature_activations.detach().cpu()
+                input_ids = input_ids.detach().cpu()
+                attn = attention_mask.detach().cpu() if attention_mask is not None else None
+
+                for b, item in enumerate(batch):
+                    if attn is not None:
+                        seq_len = int(attn[b].sum().item())
+                    else:
+                        seq_len = input_ids.shape[1]
+                    token_ids = input_ids[b, :seq_len].tolist()
+                    tokens = tokenizer.convert_ids_to_tokens(token_ids)
+                    idxs_list = idxs[b, :seq_len].tolist()
+                    acts_list = acts[b, :seq_len].tolist()
+
+                    max_by_feature = {}
+                    for t, (t_idxs, t_acts) in enumerate(zip(idxs_list, acts_list)):
+                        if token_ids[t] in special_ids:
+                            continue
+                        if not isinstance(t_idxs, (list, tuple)):
+                            t_idxs = [t_idxs]
+                        if not isinstance(t_acts, (list, tuple)):
+                            t_acts = [t_acts]
+                        for fid, act in zip(t_idxs, t_acts):
+                            if fid not in selected_set:
+                                continue
+                            if act <= 0:
+                                continue
+                            prev = max_by_feature.get(fid)
+                            if prev is None or act > prev[0]:
+                                max_by_feature[fid] = (act, t)
+
+                    for fid, (act, t) in max_by_feature.items():
+                        start = max(0, t - 4)
+                        end = min(len(tokens), t + 5)
+                        window_ids = token_ids[start:end]
+                        window_text = tokenizer.decode(window_ids, clean_up_tokenization_spaces=True)
+                        entry = {
+                            "example_id": item["example_id"],
+                            "phenomenon": item["phenomenon"],
+                            "regime": item["regime"],
+                            "sentence_field": item["sentence_field"],
+                            "sentence": item["sentence"],
+                            "token_index": t,
+                            "token_str": tokens[t],
+                            "activation_value": act,
+                            "score": act,
+                            "score_type": "activation",
+                            "window_text": window_text,
+                        }
+                        _update_heap(heaps[fid][item["regime"]], entry, args.context_topk, act)
+
+                if args.log_every and (i // args.batch_size + 1) % args.log_every == 0:
+                    print(f"  processed {min(i + args.batch_size, len(items))}/{len(items)}")
 
         # Save contexts per feature
         for fid in selected_set:
             payload = {
                 "feature_id": fid,
                 "layer": layer,
+                "logit_lens": logit_info.get(fid, {}),
                 "contexts": {},
             }
             for regime in regimes:
@@ -742,8 +912,12 @@ def main():
         "mean_score_head",
         "mean_score_tail",
         "mean_score_xtail",
+        "specialist_score",
+        "specialist_phenomena",
         "cluster_top_phenomena",
         "category",
+        "logit_lens_top_tokens",
+        "logit_lens_top_scores",
     ]
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
