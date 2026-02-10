@@ -388,7 +388,21 @@ class _IntegratedGradientIntervention:
             delattr(self.wrapper, "_ig_override_sparse_acts")
 
 
-def score_pair(wrapper, tokenizer, example, device, include_special, ig_steps):
+def _squeeze_batch1(tensor):
+    if tensor.dim() == 3 and tensor.shape[0] == 1:
+        return tensor.squeeze(0)
+    return tensor
+
+
+def score_pair(
+    wrapper,
+    tokenizer,
+    example,
+    device,
+    include_special,
+    attribution_method,
+    ig_steps,
+):
     prefix = example["_prefix"]
     prefix_ids = prefix["prefix_input_ids"]
     prefix_mask = prefix["prefix_attention_mask"]
@@ -402,53 +416,66 @@ def score_pair(wrapper, tokenizer, example, device, include_special, ig_steps):
     input_ids = torch.tensor([prefix_ids], device=device, dtype=torch.long)
     attention_mask = torch.tensor([prefix_mask], device=device, dtype=torch.long)
 
-    with _IntegratedGradientIntervention(wrapper):
-        wrapper.clear_intermediates()
+    wrapper.clear_intermediates()
+    wrapper.transformer.zero_grad(set_to_none=True)
+    wrapper.sae.zero_grad(set_to_none=True)
+    outputs = wrapper.transformer(
+        input_ids=input_ids, attention_mask=attention_mask, use_cache=False
+    )
+    feats = wrapper.saved_features
+    if feats is None:
+        raise RuntimeError("No SAE features captured; check decoder_impl and hookpoints.")
+
+    clean_idx = feats.sparse_feature_indices
+    clean_act = feats.sparse_feature_activations
+
+    logits = outputs.logits[:, -1, :]
+    metric = logits[0, good_tok] - logits[0, bad_tok]
+    logit_good = logits[0, good_tok].detach()
+    logit_bad = logits[0, bad_tok].detach()
+    logit_diff = metric.detach()
+
+    if attribution_method == "grad":
+        clean_act.retain_grad()
         wrapper.transformer.zero_grad(set_to_none=True)
         wrapper.sae.zero_grad(set_to_none=True)
-        outputs = wrapper.transformer(
-            input_ids=input_ids, attention_mask=attention_mask, use_cache=False
-        )
-        feats = wrapper.saved_features
-        if feats is None:
-            raise RuntimeError("No SAE features captured; check decoder_impl and hookpoints.")
+        metric.backward()
+        if clean_act.grad is None:
+            raise RuntimeError("Missing gradient for sparse activations.")
+        grad_act = clean_act.grad.detach()
+        contributions = (_squeeze_batch1(clean_act.detach()) * _squeeze_batch1(grad_act)).cpu()
+        feature_idx = _squeeze_batch1(clean_idx.detach()).cpu()
+    elif attribution_method == "ig":
+        clean_act_ig = _squeeze_batch1(clean_act.detach())
+        clean_idx_ig = _squeeze_batch1(clean_idx.detach())
+        grad_sum = torch.zeros_like(clean_act_ig)
+        with _IntegratedGradientIntervention(wrapper):
+            for step in range(1, ig_steps + 1):
+                alpha = float(step) / float(ig_steps)
+                override_act = (clean_act_ig * alpha).detach().requires_grad_(True)
 
-        clean_idx = feats.sparse_feature_indices.detach()
-        clean_act = feats.sparse_feature_activations.detach()
-        if clean_act.dim() == 3 and clean_act.shape[0] == 1:
-            clean_act = clean_act.squeeze(0)
-            clean_idx = clean_idx.squeeze(0)
+                wrapper.clear_intermediates()
+                wrapper.transformer.zero_grad(set_to_none=True)
+                wrapper.sae.zero_grad(set_to_none=True)
+                wrapper._ig_override_sparse_acts = override_act
 
-        logits = outputs.logits[:, -1, :]
-        logit_good = logits[0, good_tok].detach()
-        logit_bad = logits[0, bad_tok].detach()
-        logit_diff = (logit_good - logit_bad).detach()
-
-        grad_sum = torch.zeros_like(clean_act)
-        for step in range(1, ig_steps + 1):
-            alpha = float(step) / float(ig_steps)
-            override_act = (clean_act * alpha).detach().requires_grad_(True)
-
-            wrapper.clear_intermediates()
-            wrapper.transformer.zero_grad(set_to_none=True)
-            wrapper.sae.zero_grad(set_to_none=True)
-            wrapper._ig_override_sparse_acts = override_act
-
-            step_outputs = wrapper.transformer(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                use_cache=False,
-            )
-            step_logits = step_outputs.logits[:, -1, :]
-            metric = step_logits[0, good_tok] - step_logits[0, bad_tok]
-            metric.backward()
-            if override_act.grad is None:
-                raise RuntimeError("Missing gradient for IG override activation.")
-            grad_sum = grad_sum + override_act.grad.detach()
+                step_outputs = wrapper.transformer(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                )
+                step_logits = step_outputs.logits[:, -1, :]
+                step_metric = step_logits[0, good_tok] - step_logits[0, bad_tok]
+                step_metric.backward()
+                if override_act.grad is None:
+                    raise RuntimeError("Missing gradient for IG override activation.")
+                grad_sum = grad_sum + override_act.grad.detach()
 
         avg_grad = grad_sum / float(ig_steps)
-        contributions = (clean_act * avg_grad).detach().cpu()
-        feature_idx = clean_idx.detach().cpu()
+        contributions = (clean_act_ig * avg_grad).detach().cpu()
+        feature_idx = clean_idx_ig.cpu()
+    else:
+        raise ValueError(f"Unsupported attribution_method: {attribution_method}")
 
     scores = defaultdict(float)
     features_seen = set()
@@ -499,7 +526,7 @@ def build_group_topk(score_sums, feature_counts, group_size, activation_counts, 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Integrated-grad attribution on OpenSAE latents for freqBLiMP using "
+            "Gradient/IG attribution on OpenSAE latents for freqBLiMP using "
             "single-token prefix logit differences."
         )
     )
@@ -559,10 +586,17 @@ def main():
         help="Pre-tokenize examples to reduce tokenizer overhead.",
     )
     parser.add_argument(
+        "--attribution_method",
+        type=str,
+        default="grad",
+        choices=["grad", "ig"],
+        help="Attribution mode: plain gradient-times-activation (default) or integrated gradients.",
+    )
+    parser.add_argument(
         "--ig_steps",
         type=int,
         default=16,
-        help="Integrated gradients interpolation steps.",
+        help="Integrated gradients interpolation steps (used when --attribution_method ig).",
     )
     parser.add_argument(
         "--include_special_tokens",
@@ -578,7 +612,7 @@ def main():
     parser.add_argument(
         "--output_tag",
         type=str,
-        default="prefix_ig",
+        default="prefix_grad",
         help="Tag inserted into output filename.",
     )
     parser.add_argument(
@@ -606,7 +640,7 @@ def main():
         dtype = torch.float32
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available; pass --device cpu or use a GPU node.")
-    if args.ig_steps < 1:
+    if args.attribution_method == "ig" and args.ig_steps < 1:
         raise RuntimeError("--ig_steps must be >= 1")
 
     raw_examples = load_dataset(regimes, args.max_pairs, args.seed)
@@ -690,6 +724,7 @@ def main():
                 ex,
                 device,
                 args.include_special_tokens,
+                args.attribution_method,
                 args.ig_steps,
             )
 
@@ -774,8 +809,13 @@ def main():
             "avg_logit_diff": total_logit_diff / num_examples,
             "avg_delta": total_logit_diff / num_examples,
             "metric": "logit(good_token) - logit(bad_token) on shared prefix",
-            "attribution_method": "integrated_gradients_over_sparse_activations",
-            "ig_steps": args.ig_steps,
+            "attribution_method": (
+                "gradient_times_activation_over_sparse_activations"
+                if args.attribution_method == "grad"
+                else "integrated_gradients_over_sparse_activations"
+            ),
+            "attribution_method_cli": args.attribution_method,
+            "ig_steps": (args.ig_steps if args.attribution_method == "ig" else None),
             "prefix_mode": args.prefix_mode,
             "prefix_filter_stats": prefix_filter_stats,
             "prefix_label_source": "freqblimp.one_prefix_method",
