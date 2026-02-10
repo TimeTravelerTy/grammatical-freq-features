@@ -4,6 +4,7 @@ import glob
 import json
 import math
 import os
+import re
 from collections import defaultdict
 
 try:
@@ -22,15 +23,30 @@ except Exception:  # pragma: no cover - optional
     plt = None
 
 
-DEFAULT_PATTERN = "freqblimp_rare_attribution_layer*.json"
+DEFAULT_PATTERN = "freqblimp_*_attribution_layer*.json"
 
 
 def _layer_from_path(path):
     base = os.path.basename(path)
+    match = re.search(r"layer(\d+)", base)
+    if match:
+        return int(match.group(1))
     digits = "".join(ch for ch in base if ch.isdigit())
     if digits:
-        return int(digits)
+        return int(digits[:2])
     return None
+
+
+def _latest_file_per_layer(paths):
+    latest = {}
+    for path in paths:
+        layer = _layer_from_path(path)
+        if layer is None:
+            continue
+        prev = latest.get(layer)
+        if prev is None or os.path.getmtime(path) > os.path.getmtime(prev):
+            latest[layer] = path
+    return [latest[layer] for layer in sorted(latest)]
 
 
 def _activation_any_rate(feature, num_examples):
@@ -324,9 +340,12 @@ def main():
         max_any_rate = None
 
     pattern = os.path.join(args.input_dir, args.pattern)
-    files = sorted(glob.glob(pattern))
-    if not files:
+    all_files = sorted(glob.glob(pattern))
+    if not all_files:
         raise SystemExit(f"No attribution files found for pattern: {pattern}")
+    files = _latest_file_per_layer(all_files)
+    if len(files) < len(all_files):
+        print(f"[info] Using latest run per layer: {len(files)} files from {len(all_files)} matches")
 
     for path in files:
         layer, summary, features, phenomenon_features = _load_layer(path)

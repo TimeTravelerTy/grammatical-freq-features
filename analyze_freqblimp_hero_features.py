@@ -50,9 +50,18 @@ def _patch_opensae_dtype():
 _patch_opensae_dtype()
 
 DEFAULT_FILES = {
-    "head": "data/freqBLiMP/freqBLiMP_head.jsonl",
-    "tail": "data/freqBLiMP/freqBLiMP_tail.jsonl",
-    "xtail": "data/freqBLiMP/freqBLiMP_xtail.jsonl",
+    "head": [
+        "data/freqBLiMP/freqBLiMP_head.jsonl",
+        "data/freqBLiMP/freq_blimp_head*.jsonl",
+    ],
+    "tail": [
+        "data/freqBLiMP/freqBLiMP_tail.jsonl",
+        "data/freqBLiMP/freq_blimp_tail*.jsonl",
+    ],
+    "xtail": [
+        "data/freqBLiMP/freqBLiMP_xtail.jsonl",
+        "data/freqBLiMP/freq_blimp_xtail*.jsonl",
+    ],
 }
 
 
@@ -67,8 +76,8 @@ def load_freqblimp_file(path, regime):
             if not line:
                 continue
             ex = json.loads(line)
-            good = ex.get("good_rare")
-            bad = ex.get("bad_rare")
+            good = ex.get("good_freq") or ex.get("good_rare") or ex.get("good")
+            bad = ex.get("bad_freq") or ex.get("bad_rare") or ex.get("bad")
             if not good or not bad:
                 continue
             examples.append(
@@ -83,6 +92,25 @@ def load_freqblimp_file(path, regime):
                 }
             )
     return examples
+
+
+def _resolve_regime_path(regime_or_path):
+    if os.path.exists(regime_or_path):
+        return regime_or_path
+    if any(ch in regime_or_path for ch in "*?[]"):
+        matches = sorted(glob.glob(regime_or_path))
+        if matches:
+            return matches[0]
+        return regime_or_path
+    if regime_or_path in DEFAULT_FILES:
+        for candidate in DEFAULT_FILES[regime_or_path]:
+            if os.path.exists(candidate):
+                return candidate
+            if any(ch in candidate for ch in "*?[]"):
+                matches = sorted(glob.glob(candidate))
+                if matches:
+                    return matches[0]
+    return regime_or_path
 
 
 def _allocate_counts(total, group_sizes, rng):
@@ -131,7 +159,7 @@ def load_dataset(regimes, max_pairs, seed):
     all_examples = []
     by_regime = {}
     for regime in regimes:
-        path = DEFAULT_FILES.get(regime, regime)
+        path = _resolve_regime_path(regime)
         exs = load_freqblimp_file(path, regime)
         if exs:
             by_regime[regime] = exs
@@ -280,6 +308,21 @@ def _top_phenomena_from_profile(cluster_profile_row):
 
 def _parse_layers(value):
     return [int(x.strip()) for x in value.split(",") if x.strip()]
+
+
+def _find_latest_attribution_for_layer(attribution_dir, layer):
+    patterns = [
+        f"freqblimp_*_attribution_layer{layer:02d}_*.json",
+        f"freqblimp_*_attribution_layer{layer:02d}.json",
+        f"freqblimp_rare_attribution_layer{layer:02d}.json",
+    ]
+    candidates = []
+    for pattern in patterns:
+        candidates.extend(glob.glob(os.path.join(attribution_dir, pattern)))
+    if not candidates:
+        return None
+    candidates = sorted(set(candidates), key=os.path.getmtime, reverse=True)
+    return candidates[0]
 
 def _build_feature_phenomenon_scores(phenomenon_features):
     feat_scores = defaultdict(dict)
@@ -603,11 +646,9 @@ def main():
     logit_rows = []
 
     for layer in layers:
-        attrib_path = os.path.join(
-            args.attribution_dir, f"freqblimp_rare_attribution_layer{layer:02d}.json"
-        )
-        if not os.path.exists(attrib_path):
-            print(f"[warn] Missing attribution file: {attrib_path} (skipping layer)")
+        attrib_path = _find_latest_attribution_for_layer(args.attribution_dir, layer)
+        if attrib_path is None:
+            print(f"[warn] Missing attribution file for layer {layer} in {args.attribution_dir} (skipping)")
             continue
         with open(attrib_path, "r", encoding="utf-8") as f:
             attrib = json.load(f)

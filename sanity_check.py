@@ -67,7 +67,16 @@ def load_freqblimp_examples(path, n):
             line = line.strip()
             if not line:
                 continue
-            examples.append(json.loads(line))
+            ex = json.loads(line)
+            if ex.get("good_freq") is None and ex.get("good_rare") is not None:
+                ex["good_freq"] = ex["good_rare"]
+            if ex.get("bad_freq") is None and ex.get("bad_rare") is not None:
+                ex["bad_freq"] = ex["bad_rare"]
+            if ex.get("good_rare") is None and ex.get("good_freq") is not None:
+                ex["good_rare"] = ex["good_freq"]
+            if ex.get("bad_rare") is None and ex.get("bad_freq") is not None:
+                ex["bad_rare"] = ex["bad_freq"]
+            examples.append(ex)
             if n is not None and n > 0 and len(examples) >= n:
                 break
     return examples
@@ -139,7 +148,16 @@ def main():
         "--variant",
         type=str,
         default="good_original",
-        choices=["good_original", "bad_original", "good_rare", "bad_rare", "clean", "patch"],
+        choices=[
+            "good_original",
+            "bad_original",
+            "good_rare",
+            "bad_rare",
+            "good_freq",
+            "bad_freq",
+            "clean",
+            "patch",
+        ],
     )
     parser.add_argument("--variants", type=str, default=None,
                         help="Comma-separated list of variants (overrides --variant)")
