@@ -63,28 +63,6 @@ DEFAULT_FILES = {
     ],
 }
 
-PREFIX_LABEL_KEYS = (
-    "prefix_eval",
-    "prefix_evaluation",
-    "prefix",
-    "is_prefix",
-    "is_prefix_eval",
-    "one_prefix",
-    "one_prefix_method",
-    "use_prefix",
-)
-
-
-def _normalize_idx(value):
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        value = value.strip()
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return value
-
 
 def _coerce_bool(value):
     if isinstance(value, bool):
@@ -100,71 +78,16 @@ def _coerce_bool(value):
     return None
 
 
-def _extract_prefix_label(ex):
-    containers = [ex]
+def _extract_one_prefix_from_freq(ex):
+    label = _coerce_bool(ex.get("one_prefix_method"))
+    if label is not None:
+        return label
     meta = ex.get("meta")
     if isinstance(meta, dict):
-        containers.append(meta)
-    labels = ex.get("labels")
-    if isinstance(labels, dict):
-        containers.append(labels)
-    eval_info = ex.get("evaluation")
-    if isinstance(eval_info, dict):
-        containers.append(eval_info)
-
-    for container in containers:
-        for key in PREFIX_LABEL_KEYS:
-            if key in container:
-                label = _coerce_bool(container[key])
-                if label is not None:
-                    return label
-
-    if isinstance(labels, (list, tuple, set)):
-        lowered = {str(v).strip().lower() for v in labels}
-        if "prefix" in lowered:
-            return True
-        if "non_prefix" in lowered:
-            return False
-
-    methods = ex.get("evaluation_methods")
-    if isinstance(methods, (list, tuple, set)):
-        lowered = {str(v).strip().lower() for v in methods}
-        if "prefix" in lowered:
-            return True
-        if "full_sentence" in lowered:
-            return False
-
+        label = _coerce_bool(meta.get("one_prefix_method"))
+        if label is not None:
+            return label
     return None
-
-
-def load_prefix_label_map(path):
-    if not path:
-        return {}, {"file": None, "rows": 0, "labeled_rows": 0}
-    if not os.path.exists(path):
-        print(f"[warn] BLiMP original file not found: {path}; continuing without labels")
-        return {}, {"file": path, "rows": 0, "labeled_rows": 0}
-
-    labels = {}
-    rows = 0
-    labeled_rows = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rows += 1
-            ex = json.loads(line)
-            label = _extract_prefix_label(ex)
-            if label is None:
-                continue
-            key = (
-                ex.get("phenomenon"),
-                ex.get("subtask"),
-                _normalize_idx(ex.get("idx")),
-            )
-            labels[key] = label
-            labeled_rows += 1
-    return labels, {"file": path, "rows": rows, "labeled_rows": labeled_rows}
 
 
 def _resolve_regime_path(regime_or_path):
@@ -187,7 +110,7 @@ def _resolve_regime_path(regime_or_path):
     return regime_or_path
 
 
-def load_freqblimp_file(path, regime, prefix_label_map):
+def load_freqblimp_file(path, regime):
     examples = []
     if not os.path.exists(path):
         print(f"[warn] Missing file: {path} (skipping)")
@@ -203,12 +126,7 @@ def load_freqblimp_file(path, regime, prefix_label_map):
             if not good or not bad:
                 continue
 
-            key = (
-                ex.get("phenomenon") or ex.get("group"),
-                ex.get("subtask"),
-                _normalize_idx(ex.get("idx")),
-            )
-            prefix_label = prefix_label_map.get(key)
+            prefix_label = _extract_one_prefix_from_freq(ex)
             examples.append(
                 {
                     "regime": regime,
@@ -218,7 +136,7 @@ def load_freqblimp_file(path, regime, prefix_label_map):
                     "idx": ex.get("idx"),
                     "good": good,
                     "bad": bad,
-                    "prefix_eval_label": prefix_label,
+                    "one_prefix_method": prefix_label,
                 }
             )
     return examples
@@ -265,13 +183,13 @@ def _sample_by_group(examples, n, key_fn, rng):
     return sampled
 
 
-def load_dataset(regimes, max_pairs, seed, prefix_label_map):
+def load_dataset(regimes, max_pairs, seed):
     rng = random.Random(seed)
     all_examples = []
     by_regime = {}
     for regime in regimes:
         path = _resolve_regime_path(regime)
-        exs = load_freqblimp_file(path, regime, prefix_label_map)
+        exs = load_freqblimp_file(path, regime)
         if exs:
             by_regime[regime] = exs
             all_examples.extend(exs)
@@ -388,7 +306,7 @@ def prepare_prefix_examples(examples, tokenizer, prefix_mode):
             bad_encoded = _tokenize_cached(tokenizer, ex["bad"])
             ex.setdefault("_tokens", {})["bad"] = bad_encoded
 
-        label = ex.get("prefix_eval_label")
+        label = ex.get("one_prefix_method")
         prefix_meta, reason = _single_token_diff_prefix(
             good_encoded["input_ids"], bad_encoded["input_ids"], tokenizer
         )
@@ -588,7 +506,7 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="meta-llama/Meta-Llama-3.1-8B",
+        default="meta-llama/Llama-3.1-8B",
         help="HF model name or path.",
     )
     parser.add_argument(
@@ -610,20 +528,14 @@ def main():
         help="Comma-separated regimes or explicit file paths.",
     )
     parser.add_argument(
-        "--blimp_original_file",
-        type=str,
-        default="data/freqBLiMP/blimp_original.jsonl",
-        help="Original BLiMP JSONL used to inherit prefix-eval labels.",
-    )
-    parser.add_argument(
         "--prefix_mode",
         type=str,
         default="auto",
         choices=["auto", "label", "off"],
         help=(
             "How to filter to prefix-evaluable pairs: "
-            "auto=use labels when present else fallback to token single-diff; "
-            "label=require label==True; off=ignore labels and use token single-diff."
+            "auto=use one_prefix_method when present else fallback to token single-diff; "
+            "label=require one_prefix_method==True; off=ignore labels and use token single-diff."
         ),
     )
     parser.add_argument(
@@ -697,14 +609,7 @@ def main():
     if args.ig_steps < 1:
         raise RuntimeError("--ig_steps must be >= 1")
 
-    prefix_label_map, label_stats = load_prefix_label_map(args.blimp_original_file)
-    print(
-        "Prefix labels loaded:",
-        f"{label_stats['labeled_rows']}/{label_stats['rows']}",
-        f"(source: {label_stats['file']})",
-    )
-
-    raw_examples = load_dataset(regimes, args.max_pairs, args.seed, prefix_label_map)
+    raw_examples = load_dataset(regimes, args.max_pairs, args.seed)
     print(f"Raw examples loaded: {len(raw_examples)}")
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -873,9 +778,7 @@ def main():
             "ig_steps": args.ig_steps,
             "prefix_mode": args.prefix_mode,
             "prefix_filter_stats": prefix_filter_stats,
-            "prefix_label_file": label_stats["file"],
-            "prefix_labels_found": label_stats["labeled_rows"],
-            "prefix_label_rows_total": label_stats["rows"],
+            "prefix_label_source": "freqblimp.one_prefix_method",
             "phenomenon_topk": args.phenomenon_topk,
             "regime_topk": args.regime_topk,
             "run_timestamp": run_timestamp,

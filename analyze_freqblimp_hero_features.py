@@ -581,7 +581,7 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="meta-llama/Meta-Llama-3.1-8B",
+        default="meta-llama/Llama-3.1-8B",
         help="HF model name or path.",
     )
     parser.add_argument(
